@@ -368,6 +368,22 @@ static int gb_loopback_active(struct gb_loopback *gb)
 	return (gb_dev.mask == 0 || (gb_dev.mask & gb->lbid));
 }
 
+static int gb_loopback_latency_tag_enable(struct gb_loopback *gb)
+{
+	struct greybus_host_device *hd = gb->connection->hd;
+	uint16_t cport_id = gb->connection->hd_cport_id;
+
+	return	hd->driver->latency_tag_enable(hd, cport_id);
+}
+
+static int gb_loopback_latency_tag_disable(struct gb_loopback *gb)
+{
+	struct greybus_host_device *hd = gb->connection->hd;
+	uint16_t cport_id = gb->connection->hd_cport_id;
+
+	return	hd->driver->latency_tag_disable(hd, cport_id);
+}
+
 static int gb_loopback_operation_sync(struct gb_loopback *gb, int type,
 				      void *request, int request_size,
 				      void *response, int response_size)
@@ -938,6 +954,7 @@ static int gb_loopback_connection_init(struct gb_connection *connection)
 	}
 
 	gb_loopback_insert_id(gb);
+	gb_loopback_latency_tag_enable(gb);
 	gb_dev.count++;
 	mutex_unlock(&gb_dev.mutex);
 	return 0;
@@ -975,6 +992,7 @@ static void gb_loopback_connection_exit(struct gb_connection *connection)
 	connection->private = NULL;
 	kfifo_free(&gb->kfifo_lat);
 	kfifo_free(&gb->kfifo_ts);
+	gb_loopback_latency_tag_disable(gb);
 	gb_dev.count--;
 	if (!gb_dev.count) {
 		sysfs_remove_groups(kobj, loopback_dev_groups);
