@@ -79,6 +79,8 @@ struct gb_loopback {
 	struct gb_loopback_stats requests_per_second;
 
 	u32 lbid;
+	u32 reserved0_ts;
+	u32 reserved1_ts;
 	u32 iteration_count;
 	u64 elapsed_nsecs;
 	u32 error;
