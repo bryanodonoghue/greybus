@@ -25,6 +25,7 @@
 #include "greybus_manifest.h"
 #include "greybus_protocols.h"
 #include "manifest.h"
+#include "hd.h"
 #include "endo.h"
 #include "svc.h"
 #include "firmware.h"
@@ -56,64 +57,6 @@
 /* Maximum number of CPorts */
 #define CPORT_ID_MAX	4095		/* UniPro max id is 4095 */
 #define CPORT_ID_BAD	U16_MAX
-
-/* For SP1 hardware, we are going to "hardcode" each device to have all logical
- * blocks in order to be able to address them as one unified "unit".  Then
- * higher up layers will then be able to talk to them as one logical block and
- * properly know how they are hooked together (i.e. which i2c port is on the
- * same module as the gpio pins, etc.)
- *
- * So, put the "private" data structures here in greybus.h and link to them off
- * of the "main" gb_module structure.
- */
-
-struct greybus_host_device;
-
-/* Greybus "Host driver" structure, needed by a host controller driver to be
- * able to handle both SVC control as well as "real" greybus messages
- */
-struct greybus_host_driver {
-	size_t	hd_priv_size;
-
-	int (*cport_enable)(struct greybus_host_device *hd, u16 cport_id);
-	int (*cport_disable)(struct greybus_host_device *hd, u16 cport_id);
-	int (*message_send)(struct greybus_host_device *hd, u16 dest_cport_id,
-			struct gb_message *message, gfp_t gfp_mask);
-	void (*message_cancel)(struct gb_message *message);
-	int (*latency_tag_enable)(struct greybus_host_device *hd, u16 cport_id);
-	int (*latency_tag_disable)(struct greybus_host_device *hd,
-				   u16 cport_id);
-};
-
-struct greybus_host_device {
-	struct kref kref;
-	struct device *parent;
-	const struct greybus_host_driver *driver;
-
-	struct list_head interfaces;
-	struct list_head connections;
-	struct ida cport_id_map;
-	u8 device_id;
-
-	/* Number of CPorts supported by the UniPro IP */
-	size_t num_cports;
-
-	/* Host device buffer constraints */
-	size_t buffer_size_max;
-
-	struct gb_endo *endo;
-	struct gb_connection *initial_svc_connection;
-	struct gb_svc *svc;
-
-	/* Private data for the host driver */
-	unsigned long hd_priv[0] __aligned(sizeof(s64));
-};
-
-struct greybus_host_device *greybus_create_hd(struct greybus_host_driver *hd,
-					      struct device *parent,
-					      size_t buffer_size_max,
-					      size_t num_cports);
-void greybus_remove_hd(struct greybus_host_device *hd);
 
 struct greybus_driver {
 	const char *name;
@@ -165,7 +108,6 @@ extern struct device_type greybus_endo_type;
 extern struct device_type greybus_module_type;
 extern struct device_type greybus_interface_type;
 extern struct device_type greybus_bundle_type;
-extern struct device_type greybus_connection_type;
 
 static inline int is_gb_endo(const struct device *dev)
 {
@@ -187,7 +129,7 @@ static inline int is_gb_bundle(const struct device *dev)
 	return dev->type == &greybus_bundle_type;
 }
 
-static inline bool cport_id_valid(struct greybus_host_device *hd, u16 cport_id)
+static inline bool cport_id_valid(struct gb_host_device *hd, u16 cport_id)
 {
 	return cport_id != CPORT_ID_BAD && cport_id < hd->num_cports;
 }

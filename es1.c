@@ -60,7 +60,7 @@ static DEFINE_KFIFO(apb1_log_fifo, char, APB1_LOG_SIZE);
  * es1_ap_dev - ES1 USB Bridge to AP structure
  * @usb_dev: pointer to the USB device we are.
  * @usb_intf: pointer to the USB interface we are bound to.
- * @hd: pointer to our greybus_host_device structure
+ * @hd: pointer to our gb_host_device structure
  * @cport_in_endpoint: bulk in endpoint for CPort data
  * @cport-out_endpoint: bulk out endpoint for CPort data
  * @cport_in_urb: array of urbs for the CPort in messages
@@ -75,7 +75,7 @@ static DEFINE_KFIFO(apb1_log_fifo, char, APB1_LOG_SIZE);
 struct es1_ap_dev {
 	struct usb_device *usb_dev;
 	struct usb_interface *usb_intf;
-	struct greybus_host_device *hd;
+	struct gb_host_device *hd;
 
 	__u8 cport_in_endpoint;
 	__u8 cport_out_endpoint;
@@ -88,7 +88,7 @@ struct es1_ap_dev {
 	spinlock_t cport_out_urb_lock;
 };
 
-static inline struct es1_ap_dev *hd_to_es1(struct greybus_host_device *hd)
+static inline struct es1_ap_dev *hd_to_es1(struct gb_host_device *hd)
 {
 	return (struct es1_ap_dev *)&hd->hd_priv;
 }
@@ -181,7 +181,7 @@ static u16 gb_message_cport_unpack(struct gb_operation_msg_hdr *header)
  * Returns zero if the message was successfully queued, or a negative errno
  * otherwise.
  */
-static int message_send(struct greybus_host_device *hd, u16 cport_id,
+static int message_send(struct gb_host_device *hd, u16 cport_id,
 			struct gb_message *message, gfp_t gfp_mask)
 {
 	struct es1_ap_dev *es1 = hd_to_es1(hd);
@@ -244,7 +244,7 @@ static int message_send(struct greybus_host_device *hd, u16 cport_id,
  */
 static void message_cancel(struct gb_message *message)
 {
-	struct greybus_host_device *hd = message->operation->connection->hd;
+	struct gb_host_device *hd = message->operation->connection->hd;
 	struct es1_ap_dev *es1 = hd_to_es1(hd);
 	struct urb *urb;
 	int i;
@@ -277,7 +277,7 @@ static void message_cancel(struct gb_message *message)
 	usb_free_urb(urb);
 }
 
-static int latency_tag_enable(struct greybus_host_device *hd, u16 cport_id)
+static int latency_tag_enable(struct gb_host_device *hd, u16 cport_id)
 {
 	int retval;
 	struct es1_ap_dev *es1 = hd_to_es1(hd);
@@ -301,7 +301,7 @@ static int latency_tag_enable(struct greybus_host_device *hd, u16 cport_id)
 	return retval;
 }
 
-static int latency_tag_disable(struct greybus_host_device *hd, u16 cport_id)
+static int latency_tag_disable(struct gb_host_device *hd, u16 cport_id)
 {
 	int retval;
 	struct es1_ap_dev *es1 = hd_to_es1(hd);
@@ -325,7 +325,7 @@ static int latency_tag_disable(struct greybus_host_device *hd, u16 cport_id)
 	return retval;
 }
 
-static struct greybus_host_driver es1_driver = {
+static struct gb_hd_driver es1_driver = {
 	.hd_priv_size		= sizeof(struct es1_ap_dev),
 	.message_send		= message_send,
 	.message_cancel		= message_cancel,
@@ -359,16 +359,12 @@ static int check_urb_status(struct urb *urb)
 	return -EAGAIN;
 }
 
-static void ap_disconnect(struct usb_interface *interface)
+static void es1_destroy(struct es1_ap_dev *es1)
 {
-	struct es1_ap_dev *es1;
 	struct usb_device *udev;
 	int i;
 
-	es1 = usb_get_intfdata(interface);
-	if (!es1)
-		return;
-
+	debugfs_remove(apb1_log_enable_dentry);
 	usb_log_disable(es1);
 
 	/* Tear down everything! */
@@ -377,7 +373,6 @@ static void ap_disconnect(struct usb_interface *interface)
 
 		if (!urb)
 			break;
-		usb_kill_urb(urb);
 		usb_free_urb(urb);
 		es1->cport_out_urb[i] = NULL;
 		es1->cport_out_urb_busy[i] = false;	/* just to be anal */
@@ -394,16 +389,28 @@ static void ap_disconnect(struct usb_interface *interface)
 		es1->cport_in_buffer[i] = NULL;
 	}
 
-	usb_set_intfdata(interface, NULL);
 	udev = es1->usb_dev;
-	greybus_remove_hd(es1->hd);
+	gb_hd_put(es1->hd);
 
 	usb_put_dev(udev);
 }
 
+static void ap_disconnect(struct usb_interface *interface)
+{
+	struct es1_ap_dev *es1 = usb_get_intfdata(interface);
+	int i;
+
+	for (i = 0; i < NUM_CPORT_IN_URB; ++i)
+		usb_kill_urb(es1->cport_in_urb[i]);
+
+	gb_hd_del(es1->hd);
+
+	es1_destroy(es1);
+}
+
 static void cport_in_callback(struct urb *urb)
 {
-	struct greybus_host_device *hd = urb->context;
+	struct gb_host_device *hd = urb->context;
 	struct device *dev = &urb->dev->dev;
 	struct gb_operation_msg_hdr *header;
 	int status = check_urb_status(urb);
@@ -443,7 +450,7 @@ exit:
 static void cport_out_callback(struct urb *urb)
 {
 	struct gb_message *message = urb->context;
-	struct greybus_host_device *hd = message->operation->connection->hd;
+	struct gb_host_device *hd = message->operation->connection->hd;
 	struct es1_ap_dev *es1 = hd_to_es1(hd);
 	int status = check_urb_status(urb);
 	unsigned long flags;
@@ -599,7 +606,7 @@ static int ap_probe(struct usb_interface *interface,
 		    const struct usb_device_id *id)
 {
 	struct es1_ap_dev *es1;
-	struct greybus_host_device *hd;
+	struct gb_host_device *hd;
 	struct usb_device *udev;
 	struct usb_host_interface *iface_desc;
 	struct usb_endpoint_descriptor *endpoint;
@@ -613,8 +620,8 @@ static int ap_probe(struct usb_interface *interface,
 
 	udev = usb_get_dev(interface_to_usbdev(interface));
 
-	hd = greybus_create_hd(&es1_driver, &udev->dev, ES1_GBUF_MSG_SIZE_MAX,
-			       CPORT_COUNT);
+	hd = gb_hd_create(&es1_driver, &udev->dev, ES1_GBUF_MSG_SIZE_MAX,
+				CPORT_COUNT);
 	if (IS_ERR(hd)) {
 		usb_put_dev(udev);
 		return PTR_ERR(hd);
@@ -650,7 +657,7 @@ static int ap_probe(struct usb_interface *interface,
 		goto error;
 	}
 
-	/* Allocate buffers for our cport in messages and start them up */
+	/* Allocate buffers for our cport in messages */
 	for (i = 0; i < NUM_CPORT_IN_URB; ++i) {
 		struct urb *urb;
 		u8 *buffer;
@@ -668,9 +675,6 @@ static int ap_probe(struct usb_interface *interface,
 				  cport_in_callback, hd);
 		es1->cport_in_urb[i] = urb;
 		es1->cport_in_buffer[i] = buffer;
-		retval = usb_submit_urb(urb, GFP_KERNEL);
-		if (retval)
-			goto error;
 	}
 
 	/* Allocate urbs for our CPort OUT messages */
@@ -689,9 +693,25 @@ static int ap_probe(struct usb_interface *interface,
 							(S_IWUSR | S_IRUGO),
 							gb_debugfs_get(), es1,
 							&apb1_log_enable_fops);
+
+	retval = gb_hd_add(hd);
+	if (retval)
+		goto error;
+
+	for (i = 0; i < NUM_CPORT_IN_URB; ++i) {
+		retval = usb_submit_urb(es1->cport_in_urb[i], GFP_KERNEL);
+		if (retval)
+			goto err_kill_in_urbs;
+	}
+
 	return 0;
+
+err_kill_in_urbs:
+	for (--i; i >= 0; --i)
+		usb_kill_urb(es1->cport_in_urb[i]);
+	gb_hd_del(hd);
 error:
-	ap_disconnect(interface);
+	es1_destroy(es1);
 
 	return retval;
 }
