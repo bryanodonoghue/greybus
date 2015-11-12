@@ -60,6 +60,9 @@ static void gb_interface_release(struct device *dev)
 {
 	struct gb_interface *intf = to_gb_interface(dev);
 
+	kfree(intf->product_string);
+	kfree(intf->vendor_string);
+
 	kfree(intf);
 }
 
@@ -154,8 +157,7 @@ struct gb_interface *gb_interface_create(struct gb_host_device *hd,
 
 	retval = device_add(&intf->dev);
 	if (retval) {
-		pr_err("failed to add interface device for id 0x%02hhx\n",
-		       interface_id);
+		pr_err("failed to add interface %u\n", interface_id);
 		goto free_intf;
 	}
 
@@ -173,7 +175,7 @@ put_module:
 }
 
 /*
- * Tear down a previously set up module.
+ * Tear down a previously set up interface.
  */
 void gb_interface_remove(struct gb_interface *intf)
 {
@@ -190,9 +192,6 @@ void gb_interface_remove(struct gb_interface *intf)
 
 	list_for_each_entry_safe(bundle, next, &intf->bundles, links)
 		gb_bundle_destroy(bundle);
-
-	kfree(intf->product_string);
-	kfree(intf->vendor_string);
 
 	module = intf->module;
 	device_unregister(&intf->dev);

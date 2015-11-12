@@ -12,9 +12,9 @@
 
 #include "greybus.h"
 
-#define CPORT_FLAGS_E2EFC       (1)
-#define CPORT_FLAGS_CSD_N       (2)
-#define CPORT_FLAGS_CSV_N       (4)
+#define CPORT_FLAGS_E2EFC       BIT(0)
+#define CPORT_FLAGS_CSD_N       BIT(1)
+#define CPORT_FLAGS_CSV_N       BIT(2)
 
 enum gb_svc_state {
 	GB_SVC_STATE_RESET,
@@ -268,7 +268,7 @@ void gb_svc_connection_destroy(struct gb_svc *svc, u8 intf1_id, u16 cport1_id,
 	ret = gb_operation_sync(connection, GB_SVC_TYPE_CONN_DESTROY,
 				&request, sizeof(request), NULL, 0);
 	if (ret)
-		pr_err("failed to destroy connection (%hhx:%hx %hhx:%hx) %d\n",
+		pr_err("failed to destroy connection (%hhu:%hu %hhu:%hu) %d\n",
 		       intf1_id, cport1_id, intf2_id, cport2_id, ret);
 }
 EXPORT_SYMBOL_GPL(gb_svc_connection_destroy);
@@ -300,7 +300,7 @@ static void gb_svc_route_destroy(struct gb_svc *svc, u8 intf1_id, u8 intf2_id)
 	ret = gb_operation_sync(svc->connection, GB_SVC_TYPE_ROUTE_DESTROY,
 				&request, sizeof(request), NULL, 0);
 	if (ret)
-		pr_err("failed to destroy route (%hhx %hhx) %d\n",
+		pr_err("failed to destroy route (%hhu %hhu) %d\n",
 			intf1_id, intf2_id, ret);
 }
 
