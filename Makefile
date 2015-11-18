@@ -24,24 +24,22 @@ gb-phy-y :=	gpbridge.o	\
 
 # Prefix all modules with gb-
 gb-vibrator-y := vibrator.o
-gb-battery-y := battery.o
+gb-power-supply-y := power_supply.o
 gb-loopback-y := loopback.o
 gb-light-y := light.o
 gb-raw-y := raw.o
 gb-hid-y := hid.o
-gb-es1-y := es1.o
 gb-es2-y := es2.o
 gb-db3-y := db3-platform.o
 
 obj-m += greybus.o
 obj-m += gb-phy.o
 obj-m += gb-vibrator.o
-obj-m += gb-battery.o
+obj-m += gb-power-supply.o
 obj-m += gb-loopback.o
 obj-m += gb-light.o
 obj-m += gb-hid.o
 obj-m += gb-raw.o
-obj-m += gb-es1.o
 obj-m += gb-es2.o
 obj-m += gb-db3.o
 
@@ -51,7 +49,7 @@ INSTALL_MOD_PATH	?= /..
 PWD			:= $(shell pwd)
 
 # kernel config option that shall be enable
-CONFIG_OPTIONS_ENABLE := PWM SYSFS SPI USB SND_SOC MMC LEDS_CLASS
+CONFIG_OPTIONS_ENABLE := POWER_SUPPLY PWM SYSFS SPI USB SND_SOC MMC LEDS_CLASS
 
 # kernel config option that shall be disable
 CONFIG_OPTIONS_DISABLE :=

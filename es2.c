@@ -22,7 +22,6 @@
 #define ES2_GBUF_MSG_SIZE_MAX	2048
 
 static const struct usb_device_id id_table[] = {
-	{ USB_DEVICE(0xffff, 0x0002) },	/* Made up number, delete once firmware is fixed to use real number */
 	{ USB_DEVICE(0x18d1, 0x1eaf) },
 	{ },
 };
@@ -440,7 +439,7 @@ static int cport_reset(struct gb_host_device *hd, u16 cport_id)
 	retval = usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
 				 REQUEST_RESET_CPORT,
 				 USB_DIR_OUT | USB_TYPE_VENDOR |
-				 USB_RECIP_INTERFACE, 0, cport_id,
+				 USB_RECIP_INTERFACE, cport_id, 0,
 				 NULL, 0, ES2_TIMEOUT);
 	if (retval < 0) {
 		dev_err(&udev->dev, "failed to reset cport %hu: %d\n", cport_id,
