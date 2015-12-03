@@ -20,10 +20,12 @@ gb_connection_intf_find(struct gb_interface *intf, u16 cport_id)
 	struct gb_host_device *hd = intf->hd;
 	struct gb_connection *connection;
 
-	list_for_each_entry(connection, &hd->connections, hd_links)
-		if (connection->bundle->intf == intf &&
+	list_for_each_entry(connection, &hd->connections, hd_links) {
+		if (connection->intf == intf &&
 				connection->intf_cport_id == cport_id)
 			return connection;
+	}
+
 	return NULL;
 }
 
@@ -55,7 +57,7 @@ void greybus_data_rcvd(struct gb_host_device *hd, u16 cport_id,
 
 	connection = gb_connection_hd_find(hd, cport_id);
 	if (!connection) {
-		dev_err(hd->parent,
+		dev_err(&hd->dev,
 			"nonexistent connection (%zu bytes dropped)\n", length);
 		return;
 	}
@@ -75,44 +77,48 @@ static void gb_connection_kref_release(struct kref *kref)
 	mutex_unlock(&connection_mutex);
 }
 
-int svc_update_connection(struct gb_interface *intf,
-			  struct gb_connection *connection)
+static void gb_connection_init_name(struct gb_connection *connection)
 {
-	struct gb_bundle *bundle;
+	u16 hd_cport_id = connection->hd_cport_id;
+	u16 cport_id = 0;
+	u8 intf_id = 0;
 
-	bundle = gb_bundle_create(intf, GB_SVC_BUNDLE_ID, GREYBUS_CLASS_SVC);
-	if (!bundle)
-		return -EINVAL;
+	if (connection->intf) {
+		intf_id = connection->intf->interface_id;
+		cport_id = connection->intf_cport_id;
+	}
 
-	connection->bundle = bundle;
-
-	spin_lock_irq(&gb_connections_lock);
-	list_add(&connection->bundle_links, &bundle->connections);
-	spin_unlock_irq(&gb_connections_lock);
-
-	return 0;
+	snprintf(connection->name, sizeof(connection->name),
+			"%hu/%hhu:%hu", hd_cport_id, intf_id, cport_id);
 }
 
 /*
- * Set up a Greybus connection, representing the bidirectional link
+ * gb_connection_create() - create a Greybus connection
+ * @hd:			host device of the connection
+ * @hd_cport_id:	host-device cport id, or -1 for dynamic allocation
+ * @intf:		remote interface, or NULL for static connections
+ * @bundle:		remote-interface bundle (may be NULL)
+ * @cport_id:		remote-interface cport id, or 0 for static connections
+ * @protocol_id:	protocol id
+ *
+ * Create a Greybus connection, representing the bidirectional link
  * between a CPort on a (local) Greybus host device and a CPort on
- * another Greybus module.
+ * another Greybus interface.
  *
  * A connection also maintains the state of operations sent over the
  * connection.
  *
- * Returns a pointer to the new connection if successful, or a null
- * pointer otherwise.
+ * Return: A pointer to the new connection if successful, or NULL otherwise.
  */
-struct gb_connection *
-gb_connection_create_range(struct gb_host_device *hd,
-			   struct gb_bundle *bundle, struct device *parent,
-			   u16 cport_id, u8 protocol_id, u32 ida_start,
-			   u32 ida_end)
+static struct gb_connection *
+gb_connection_create(struct gb_host_device *hd, int hd_cport_id,
+				struct gb_interface *intf,
+				struct gb_bundle *bundle, int cport_id,
+				u8 protocol_id)
 {
 	struct gb_connection *connection;
 	struct ida *id_map = &hd->cport_id_map;
-	int hd_cport_id;
+	int ida_start, ida_end;
 	int retval;
 	u8 major = 0;
 	u8 minor = 1;
@@ -128,6 +134,17 @@ gb_connection_create_range(struct gb_host_device *hd,
 		return NULL;
 	}
 
+	if (hd_cport_id < 0) {
+		ida_start = 0;
+		ida_end = hd->num_cports;
+	} else if (hd_cport_id < hd->num_cports) {
+		ida_start = hd_cport_id;
+		ida_end = hd_cport_id + 1;
+	} else {
+		dev_err(&hd->dev, "cport %d not available\n", hd_cport_id);
+		return NULL;
+	}
+
 	hd_cport_id = ida_simple_get(id_map, ida_start, ida_end, GFP_KERNEL);
 	if (hd_cport_id < 0)
 		return NULL;
@@ -139,6 +156,7 @@ gb_connection_create_range(struct gb_host_device *hd,
 	connection->hd_cport_id = hd_cport_id;
 	connection->intf_cport_id = cport_id;
 	connection->hd = hd;
+	connection->intf = intf;
 
 	connection->protocol_id = protocol_id;
 	connection->major = major;
@@ -152,11 +170,13 @@ gb_connection_create_range(struct gb_host_device *hd,
 	INIT_LIST_HEAD(&connection->operations);
 
 	connection->wq = alloc_workqueue("%s:%d", WQ_UNBOUND, 1,
-					 dev_name(parent), cport_id);
+					 dev_name(&hd->dev), hd_cport_id);
 	if (!connection->wq)
 		goto err_free_connection;
 
 	kref_init(&connection->kref);
+
+	gb_connection_init_name(connection);
 
 	spin_lock_irq(&gb_connections_lock);
 	list_add(&connection->hd_links, &hd->connections);
@@ -170,8 +190,8 @@ gb_connection_create_range(struct gb_host_device *hd,
 
 	retval = gb_connection_bind_protocol(connection);
 	if (retval) {
-		dev_err(parent, "%d: failed to bind protocol: %d\n",
-			cport_id, retval);
+		dev_err(&hd->dev, "%s: failed to bind protocol: %d\n",
+			connection->name, retval);
 		gb_connection_destroy(connection);
 		return NULL;
 	}
@@ -186,6 +206,23 @@ err_remove_ida:
 	return NULL;
 }
 
+struct gb_connection *
+gb_connection_create_static(struct gb_host_device *hd,
+					u16 hd_cport_id, u8 protocol_id)
+{
+	return gb_connection_create(hd, hd_cport_id, NULL, NULL, 0,
+								protocol_id);
+}
+
+struct gb_connection *
+gb_connection_create_dynamic(struct gb_interface *intf,
+					struct gb_bundle *bundle,
+					u16 cport_id, u8 protocol_id)
+{
+	return gb_connection_create(intf->hd, -1, intf, bundle, cport_id,
+								protocol_id);
+}
+
 static int gb_connection_hd_cport_enable(struct gb_connection *connection)
 {
 	struct gb_host_device *hd = connection->hd;
@@ -196,7 +233,7 @@ static int gb_connection_hd_cport_enable(struct gb_connection *connection)
 
 	ret = hd->driver->cport_enable(hd, connection->hd_cport_id);
 	if (ret) {
-		dev_err(hd->parent,
+		dev_err(&hd->dev,
 			"failed to enable host cport: %d\n", ret);
 		return ret;
 	}
@@ -212,14 +249,6 @@ static void gb_connection_hd_cport_disable(struct gb_connection *connection)
 		return;
 
 	hd->driver->cport_disable(hd, connection->hd_cport_id);
-}
-
-struct gb_connection *gb_connection_create(struct gb_bundle *bundle,
-				u16 cport_id, u8 protocol_id)
-{
-	return gb_connection_create_range(bundle->intf->hd, bundle,
-					  &bundle->dev, cport_id, protocol_id,
-					  0, bundle->intf->hd->num_cports - 1);
 }
 
 /*
@@ -259,23 +288,23 @@ static int
 gb_connection_svc_connection_create(struct gb_connection *connection)
 {
 	struct gb_host_device *hd = connection->hd;
-	struct gb_protocol *protocol = connection->protocol;
 	struct gb_interface *intf;
 	int ret;
 
-	if (protocol->flags & GB_PROTOCOL_SKIP_SVC_CONNECTION)
+	if (gb_connection_is_static(connection))
 		return 0;
 
-	intf = connection->bundle->intf;
+	intf = connection->intf;
 	ret = gb_svc_connection_create(hd->svc,
-			hd->endo->ap_intf_id,
+			hd->svc->ap_intf_id,
 			connection->hd_cport_id,
 			intf->interface_id,
 			connection->intf_cport_id,
 			intf->boot_over_unipro);
 	if (ret) {
-		dev_err(&connection->bundle->dev,
-			"failed to create svc connection: %d\n", ret);
+		dev_err(&connection->hd->dev,
+			"%s: failed to create svc connection: %d\n",
+			connection->name, ret);
 		return ret;
 	}
 
@@ -285,13 +314,13 @@ gb_connection_svc_connection_create(struct gb_connection *connection)
 static void
 gb_connection_svc_connection_destroy(struct gb_connection *connection)
 {
-	if (connection->protocol->flags & GB_PROTOCOL_SKIP_SVC_CONNECTION)
+	if (gb_connection_is_static(connection))
 		return;
 
 	gb_svc_connection_destroy(connection->hd->svc,
-				  connection->hd->endo->ap_intf_id,
+				  connection->hd->svc->ap_intf_id,
 				  connection->hd_cport_id,
-				  connection->bundle->intf->interface_id,
+				  connection->intf->interface_id,
 				  connection->intf_cport_id);
 }
 
@@ -467,8 +496,9 @@ void gb_connection_latency_tag_enable(struct gb_connection *connection)
 
 	ret = hd->driver->latency_tag_enable(hd, connection->hd_cport_id);
 	if (ret) {
-		dev_err(&connection->bundle->dev,
-			"failed to enable latency tag: %d\n", ret);
+		dev_err(&connection->hd->dev,
+			"%s: failed to enable latency tag: %d\n",
+			connection->name, ret);
 	}
 }
 EXPORT_SYMBOL_GPL(gb_connection_latency_tag_enable);
@@ -483,8 +513,9 @@ void gb_connection_latency_tag_disable(struct gb_connection *connection)
 
 	ret = hd->driver->latency_tag_disable(hd, connection->hd_cport_id);
 	if (ret) {
-		dev_err(&connection->bundle->dev,
-			"failed to disable latency tag: %d\n", ret);
+		dev_err(&connection->hd->dev,
+			"%s: failed to disable latency tag: %d\n",
+			connection->name, ret);
 	}
 }
 EXPORT_SYMBOL_GPL(gb_connection_latency_tag_disable);
@@ -502,7 +533,7 @@ int gb_connection_bind_protocol(struct gb_connection *connection)
 				   connection->major,
 				   connection->minor);
 	if (!protocol) {
-		dev_warn(connection->hd->parent,
+		dev_warn(&connection->hd->dev,
 				"protocol 0x%02hhx version %hhu.%hhu not found\n",
 				connection->protocol_id,
 				connection->major, connection->minor);
@@ -510,19 +541,11 @@ int gb_connection_bind_protocol(struct gb_connection *connection)
 	}
 	connection->protocol = protocol;
 
-	/*
-	 * If we have a valid device_id for the interface block, then we have an
-	 * active device, so bring up the connection at the same time.
-	 */
-	if ((!connection->bundle &&
-	     protocol->flags & GB_PROTOCOL_NO_BUNDLE) ||
-	    connection->bundle->intf->device_id != GB_DEVICE_ID_BAD) {
-		ret = gb_connection_init(connection);
-		if (ret) {
-			gb_protocol_put(protocol);
-			connection->protocol = NULL;
-			return ret;
-		}
+	ret = gb_connection_init(connection);
+	if (ret) {
+		gb_protocol_put(protocol);
+		connection->protocol = NULL;
+		return ret;
 	}
 
 	return 0;

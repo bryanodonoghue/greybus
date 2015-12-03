@@ -11,15 +11,59 @@
 
 #include "greybus.h"
 
+#define ES2_UNIPRO_MFG_ID	0x00000126
+#define ES2_UNIPRO_PROD_ID	0x00001000
+
 struct gb_firmware {
 	struct gb_connection	*connection;
 	const struct firmware	*fw;
+	u32			vendor_id;
+	u32			product_id;
 };
 
 static void free_firmware(struct gb_firmware *firmware)
 {
 	release_firmware(firmware->fw);
 	firmware->fw = NULL;
+}
+
+/*
+ * The es2 chip doesn't have VID/PID programmed into the hardware and we need to
+ * hack that up to distinguish different modules and their firmware blobs.
+ *
+ * This fetches VID/PID (over firmware protocol) for es2 chip only, when VID/PID
+ * already sent during hotplug are 0.
+ *
+ * Otherwise, we keep firmware->vendor_id/product_id same as what's passed
+ * during hotplug.
+ */
+static void firmware_es2_fixup_vid_pid(struct gb_firmware *firmware)
+{
+	struct gb_firmware_get_vid_pid_response response;
+	struct gb_connection *connection = firmware->connection;
+	struct gb_interface *intf = connection->bundle->intf;
+	int ret;
+
+	/*
+	 * Use VID/PID specified at hotplug if:
+	 * - Bridge ASIC chip isn't ES2
+	 * - Received non-zero Vendor/Product ids
+	 */
+	if (intf->unipro_mfg_id != ES2_UNIPRO_MFG_ID ||
+	    intf->unipro_prod_id != ES2_UNIPRO_PROD_ID ||
+	    intf->vendor_id != 0 || intf->product_id != 0)
+		return;
+
+	ret = gb_operation_sync(connection, GB_FIRMWARE_TYPE_GET_VID_PID,
+				NULL, 0, &response, sizeof(response));
+	if (ret) {
+		dev_err(&connection->bundle->dev,
+			"Firmware get vid/pid operation failed (%d)\n", ret);
+		return;
+	}
+
+	firmware->vendor_id = le32_to_cpu(response.vendor_id);
+	firmware->product_id = le32_to_cpu(response.product_id);
 }
 
 /* This returns path of the firmware blob on the disk */
@@ -41,7 +85,7 @@ static int download_firmware(struct gb_firmware *firmware, u8 stage)
 	snprintf(firmware_name, sizeof(firmware_name),
 		 "ara:%08x:%08x:%08x:%08x:%02x.tftf",
 		 intf->unipro_mfg_id, intf->unipro_prod_id,
-		 intf->ara_vend_id, intf->ara_prod_id, stage);
+		 firmware->vendor_id, firmware->product_id, stage);
 
 	return request_firmware(&firmware->fw, firmware_name,
 				&connection->bundle->dev);
@@ -87,7 +131,8 @@ static int gb_firmware_get_firmware(struct gb_operation *op)
 {
 	struct gb_connection *connection = op->connection;
 	struct gb_firmware *firmware = connection->private;
-	struct gb_firmware_get_firmware_request *firmware_request = op->request->payload;
+	const struct firmware *fw = firmware->fw;
+	struct gb_firmware_get_firmware_request *firmware_request;
 	struct gb_firmware_get_firmware_response *firmware_response;
 	struct device *dev = &connection->bundle->dev;
 	unsigned int offset, size;
@@ -99,13 +144,20 @@ static int gb_firmware_get_firmware(struct gb_operation *op)
 		return -EINVAL;
 	}
 
-	if (!firmware->fw) {
+	if (!fw) {
 		dev_err(dev, "%s: firmware not available\n", __func__);
 		return -EINVAL;
 	}
 
+	firmware_request = op->request->payload;
 	offset = le32_to_cpu(firmware_request->offset);
 	size = le32_to_cpu(firmware_request->size);
+
+	if (offset >= fw->size || size > fw->size - offset) {
+		dev_warn(dev, "bad firmware request (offs = %u, size = %u)\n",
+				offset, size);
+		return -EINVAL;
+	}
 
 	if (!gb_operation_response_alloc(op, sizeof(*firmware_response) + size,
 					 GFP_KERNEL)) {
@@ -114,7 +166,7 @@ static int gb_firmware_get_firmware(struct gb_operation *op)
 	}
 
 	firmware_response = op->response->payload;
-	memcpy(firmware_response->data, firmware->fw->data + offset, size);
+	memcpy(firmware_response->data, fw->data + offset, size);
 
 	return 0;
 }
@@ -122,7 +174,7 @@ static int gb_firmware_get_firmware(struct gb_operation *op)
 static int gb_firmware_ready_to_boot(struct gb_operation *op)
 {
 	struct gb_connection *connection = op->connection;
-	struct gb_firmware_ready_to_boot_request *rtb_request = op->request->payload;
+	struct gb_firmware_ready_to_boot_request *rtb_request;
 	struct device *dev = &connection->bundle->dev;
 	u8 status;
 
@@ -133,6 +185,7 @@ static int gb_firmware_ready_to_boot(struct gb_operation *op)
 		return -EINVAL;
 	}
 
+	rtb_request = op->request->payload;
 	status = rtb_request->status;
 
 	/* Return error if the blob was invalid */
@@ -174,6 +227,11 @@ static int gb_firmware_connection_init(struct gb_connection *connection)
 	firmware->connection = connection;
 	connection->private = firmware;
 
+	firmware->vendor_id = connection->intf->vendor_id;
+	firmware->product_id = connection->intf->product_id;
+
+	firmware_es2_fixup_vid_pid(firmware);
+
 	/*
 	 * Module's Bootrom needs a way to know (currently), when to start
 	 * sending requests to the AP. The version request is sent before this
@@ -185,8 +243,10 @@ static int gb_firmware_connection_init(struct gb_connection *connection)
 	 */
 	ret = gb_operation_sync(connection, GB_FIRMWARE_TYPE_AP_READY, NULL, 0,
 				NULL, 0);
-	if (ret)
-		dev_err(&connection->bundle->dev, "Failed to send AP READY (%d)\n", ret);
+	if (ret) {
+		dev_err(&connection->bundle->dev,
+				"failed to send AP READY: %d\n", ret);
+	}
 
 	return 0;
 }

@@ -533,16 +533,16 @@ static int gb_loopback_request_recv(u8 type, struct gb_operation *operation)
 			return -EINVAL;
 		}
 
-		if (len) {
-			if (!gb_operation_response_alloc(operation, len,
-							 GFP_KERNEL)) {
-				dev_err(dev, "error allocating response\n");
-				return -ENOMEM;
-			}
-			response = operation->response->payload;
-			response->len = cpu_to_le32(len);
-			memcpy(response->data, request->data, len);
+		if (!gb_operation_response_alloc(operation,
+				len + sizeof(*response), GFP_KERNEL)) {
+			dev_err(dev, "error allocating response\n");
+			return -ENOMEM;
 		}
+		response = operation->response->payload;
+		response->len = cpu_to_le32(len);
+		if (len)
+			memcpy(response->data, request->data, len);
+
 		return 0;
 	default:
 		dev_err(dev, "unsupported request: %hhu\n", type);
@@ -878,12 +878,6 @@ static int gb_loopback_bus_id_compare(void *priv, struct list_head *lha,
 	struct gb_connection *ca = a->connection;
 	struct gb_connection *cb = b->connection;
 
-	if (ca->bundle->intf->module->module_id <
-	    cb->bundle->intf->module->module_id)
-		return -1;
-	if (cb->bundle->intf->module->module_id <
-	    ca->bundle->intf->module->module_id)
-		return 1;
 	if (ca->bundle->intf->interface_id < cb->bundle->intf->interface_id)
 		return -1;
 	if (cb->bundle->intf->interface_id < ca->bundle->intf->interface_id)
@@ -928,10 +922,11 @@ static int gb_loopback_connection_init(struct gb_connection *connection)
 		return -ENOMEM;
 	gb_loopback_reset_stats(&gb_dev);
 
-	/* If this is the first connection - create a module endo0 entry */
+	/* If this is the first connection - create a per-bus entry */
 	mutex_lock(&gb_dev.mutex);
 	if (!gb_dev.count) {
-		snprintf(name, sizeof(name), "raw_latency_endo0");
+		snprintf(name, sizeof(name), "raw_latency_%d",
+				connection->bundle->intf->hd->bus_id);
 		gb_dev.file = debugfs_create_file(name, S_IFREG | S_IRUGO,
 						  gb_dev.root, &gb_dev,
 				  &gb_loopback_debugfs_dev_latency_ops);

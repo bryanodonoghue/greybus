@@ -9,14 +9,23 @@
 
 #include "greybus.h"
 
-static ssize_t class_show(struct device *dev, struct device_attribute *attr,
-			  char *buf)
+static ssize_t bundle_class_show(struct device *dev,
+				 struct device_attribute *attr, char *buf)
 {
 	struct gb_bundle *bundle = to_gb_bundle(dev);
 
-	return sprintf(buf, "%d\n", bundle->class);
+	return sprintf(buf, "0x%02x\n", bundle->class);
 }
-static DEVICE_ATTR_RO(class);
+static DEVICE_ATTR_RO(bundle_class);
+
+static ssize_t bundle_id_show(struct device *dev,
+			      struct device_attribute *attr, char *buf)
+{
+	struct gb_bundle *bundle = to_gb_bundle(dev);
+
+	return sprintf(buf, "%u\n", bundle->id);
+}
+static DEVICE_ATTR_RO(bundle_id);
 
 static ssize_t state_show(struct device *dev, struct device_attribute *attr,
 			  char *buf)
@@ -48,7 +57,8 @@ static DEVICE_ATTR_RW(state);
 
 
 static struct attribute *bundle_attrs[] = {
-	&dev_attr_class.attr,
+	&dev_attr_bundle_class.attr,
+	&dev_attr_bundle_id.attr,
 	&dev_attr_state.attr,
 	NULL,
 };
@@ -67,45 +77,6 @@ struct device_type greybus_bundle_type = {
 	.name =		"greybus_bundle",
 	.release =	gb_bundle_release,
 };
-
-static int gb_bundle_match_one_id(struct gb_bundle *bundle,
-				     const struct greybus_bundle_id *id)
-{
-	if ((id->match_flags & GREYBUS_ID_MATCH_VENDOR) &&
-	    (id->vendor != bundle->intf->vendor))
-		return 0;
-
-	if ((id->match_flags & GREYBUS_ID_MATCH_PRODUCT) &&
-	    (id->product != bundle->intf->product))
-		return 0;
-
-	if ((id->match_flags & GREYBUS_ID_MATCH_SERIAL) &&
-	    (id->unique_id != bundle->intf->unique_id))
-		return 0;
-
-	if ((id->match_flags & GREYBUS_ID_MATCH_CLASS) &&
-	    (id->class != bundle->class))
-		return 0;
-
-	return 1;
-}
-
-const struct greybus_bundle_id *
-gb_bundle_match_id(struct gb_bundle *bundle,
-		   const struct greybus_bundle_id *id)
-{
-	if (id == NULL)
-		return NULL;
-
-	for (; id->vendor || id->product || id->unique_id || id->class ||
-	       id->driver_info; id++) {
-		if (gb_bundle_match_one_id(bundle, id))
-			return id;
-	}
-
-	return NULL;
-}
-
 
 /* XXX This could be per-host device or per-module */
 static DEFINE_SPINLOCK(gb_bundles_lock);
@@ -177,7 +148,7 @@ struct gb_bundle *gb_bundle_create(struct gb_interface *intf, u8 bundle_id,
 	bundle->dev.type = &greybus_bundle_type;
 	bundle->dev.groups = bundle_groups;
 	device_initialize(&bundle->dev);
-	dev_set_name(&bundle->dev, "%s:%d", dev_name(&intf->dev), bundle_id);
+	dev_set_name(&bundle->dev, "%s.%d", dev_name(&intf->dev), bundle_id);
 
 	retval = device_add(&bundle->dev);
 	if (retval) {

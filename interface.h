@@ -22,19 +22,15 @@ struct gb_interface {
 	u8 device_id;		/* Device id allocated for the interface block by the SVC */
 
 	/* Information taken from the manifest descriptor */
-	u16 vendor;
-	u16 product;
 	char *vendor_string;
 	char *product_string;
-	u64 unique_id;
 
 	/* Information taken from the hotplug event */
 	u32 unipro_mfg_id;
 	u32 unipro_prod_id;
-	u32 ara_vend_id;
-	u32 ara_prod_id;
+	u32 vendor_id;
+	u32 product_id;
 
-	struct gb_module *module;
 	struct gb_host_device *hd;
 
 	/* The interface needs to boot over unipro */
@@ -65,5 +61,4 @@ int gb_interface_init(struct gb_interface *intf, u8 device_id);
 void gb_interface_remove(struct gb_interface *intf);
 void gb_interfaces_remove(struct gb_host_device *hd);
 
-int gb_create_bundle_connection(struct gb_interface *intf, u8 class);
 #endif /* __INTERFACE_H */

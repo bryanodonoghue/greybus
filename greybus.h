@@ -26,10 +26,8 @@
 #include "greybus_protocols.h"
 #include "manifest.h"
 #include "hd.h"
-#include "endo.h"
 #include "svc.h"
 #include "firmware.h"
-#include "module.h"
 #include "control.h"
 #include "interface.h"
 #include "bundle.h"
@@ -42,17 +40,17 @@
 #define GREYBUS_VERSION_MAJOR	0x00
 #define GREYBUS_VERSION_MINOR	0x01
 
-#define GREYBUS_DEVICE_ID_MATCH_DEVICE \
-	(GREYBUS_DEVICE_ID_MATCH_VENDOR | GREYBUS_DEVICE_ID_MATCH_PRODUCT)
+#define GREYBUS_ID_MATCH_DEVICE \
+	(GREYBUS_ID_MATCH_VENDOR | GREYBUS_ID_MATCH_PRODUCT)
 
 #define GREYBUS_DEVICE(v, p)					\
-	.match_flags	= GREYBUS_DEVICE_ID_MATCH_DEVICE,	\
+	.match_flags	= GREYBUS_ID_MATCH_DEVICE,		\
 	.vendor		= (v),					\
 	.product	= (p),
 
-#define GREYBUS_DEVICE_SERIAL(s)				\
-	.match_flags	= GREYBUS_DEVICE_ID_MATCH_SERIAL,	\
-	.serial_number	= (s),
+#define GREYBUS_DEVICE_CLASS(c)					\
+	.match_flags	= GREYBUS_ID_MATCH_CLASS,		\
+	.class		= (c),
 
 /* Maximum number of CPorts */
 #define CPORT_ID_MAX	4095		/* UniPro max id is 4095 */
@@ -104,19 +102,14 @@ struct dentry *gb_debugfs_get(void);
 
 extern struct bus_type greybus_bus_type;
 
-extern struct device_type greybus_endo_type;
-extern struct device_type greybus_module_type;
+extern struct device_type greybus_hd_type;
 extern struct device_type greybus_interface_type;
 extern struct device_type greybus_bundle_type;
+extern struct device_type greybus_svc_type;
 
-static inline int is_gb_endo(const struct device *dev)
+static inline int is_gb_host_device(const struct device *dev)
 {
-	return dev->type == &greybus_endo_type;
-}
-
-static inline int is_gb_module(const struct device *dev)
-{
-	return dev->type == &greybus_module_type;
+	return dev->type == &greybus_hd_type;
 }
 
 static inline int is_gb_interface(const struct device *dev)
@@ -127,6 +120,11 @@ static inline int is_gb_interface(const struct device *dev)
 static inline int is_gb_bundle(const struct device *dev)
 {
 	return dev->type == &greybus_bundle_type;
+}
+
+static inline int is_gb_svc(const struct device *dev)
+{
+	return dev->type == &greybus_svc_type;
 }
 
 static inline bool cport_id_valid(struct gb_host_device *hd, u16 cport_id)

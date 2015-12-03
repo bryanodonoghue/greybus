@@ -29,13 +29,46 @@ int greybus_disabled(void)
 }
 EXPORT_SYMBOL_GPL(greybus_disabled);
 
+static int greybus_match_one_id(struct gb_bundle *bundle,
+				     const struct greybus_bundle_id *id)
+{
+	if ((id->match_flags & GREYBUS_ID_MATCH_VENDOR) &&
+	    (id->vendor != bundle->intf->vendor_id))
+		return 0;
+
+	if ((id->match_flags & GREYBUS_ID_MATCH_PRODUCT) &&
+	    (id->product != bundle->intf->product_id))
+		return 0;
+
+	if ((id->match_flags & GREYBUS_ID_MATCH_CLASS) &&
+	    (id->class != bundle->class))
+		return 0;
+
+	return 1;
+}
+
+static const struct greybus_bundle_id *
+greybus_match_id(struct gb_bundle *bundle, const struct greybus_bundle_id *id)
+{
+	if (id == NULL)
+		return NULL;
+
+	for (; id->vendor || id->product || id->class || id->driver_info;
+									id++) {
+		if (greybus_match_one_id(bundle, id))
+			return id;
+	}
+
+	return NULL;
+}
+
 static int greybus_module_match(struct device *dev, struct device_driver *drv)
 {
 	struct greybus_driver *driver = to_greybus_driver(drv);
 	struct gb_bundle *bundle = to_gb_bundle(dev);
 	const struct greybus_bundle_id *id;
 
-	id = gb_bundle_match_id(bundle, driver->id_table);
+	id = greybus_match_id(bundle, driver->id_table);
 	if (id)
 		return 1;
 	/* FIXME - Dynamic ids? */
@@ -44,25 +77,20 @@ static int greybus_module_match(struct device *dev, struct device_driver *drv)
 
 static int greybus_uevent(struct device *dev, struct kobj_uevent_env *env)
 {
-	struct gb_module *module = NULL;
+	struct gb_host_device *hd = NULL;
 	struct gb_interface *intf = NULL;
 	struct gb_bundle *bundle = NULL;
+	struct gb_svc *svc = NULL;
 
-	if (is_gb_endo(dev)) {
-		/*
-		 * Not much to do for an endo, just fall through, as the
-		 * "default" attributes are good enough for us.
-		 */
-		return 0;
-	}
-
-	if (is_gb_module(dev)) {
-		module = to_gb_module(dev);
+	if (is_gb_host_device(dev)) {
+		hd = to_gb_host_device(dev);
 	} else if (is_gb_interface(dev)) {
 		intf = to_gb_interface(dev);
 	} else if (is_gb_bundle(dev)) {
 		bundle = to_gb_bundle(dev);
 		intf = bundle->intf;
+	} else if (is_gb_svc(dev)) {
+		svc = to_gb_svc(dev);
 	} else {
 		dev_WARN(dev, "uevent for unknown greybus device \"type\"!\n");
 		return -EINVAL;
@@ -97,7 +125,7 @@ static int greybus_probe(struct device *dev)
 	int retval;
 
 	/* match id */
-	id = gb_bundle_match_id(bundle, driver->id_table);
+	id = greybus_match_id(bundle, driver->id_table);
 	if (!id)
 		return -ENODEV;
 
@@ -163,16 +191,16 @@ static int __init gb_init(void)
 		goto error_bus;
 	}
 
+	retval = gb_hd_init();
+	if (retval) {
+		pr_err("gb_hd_init failed (%d)\n", retval);
+		goto error_hd;
+	}
+
 	retval = gb_operation_init();
 	if (retval) {
 		pr_err("gb_operation_init failed (%d)\n", retval);
 		goto error_operation;
-	}
-
-	retval = gb_endo_init();
-	if (retval) {
-		pr_err("gb_endo_init failed (%d)\n", retval);
-		goto error_endo;
 	}
 
 	retval = gb_control_protocol_init();
@@ -200,10 +228,10 @@ error_firmware:
 error_svc:
 	gb_control_protocol_exit();
 error_control:
-	gb_endo_exit();
-error_endo:
 	gb_operation_exit();
 error_operation:
+	gb_hd_exit();
+error_hd:
 	bus_unregister(&greybus_bus_type);
 error_bus:
 	gb_debugfs_cleanup();
@@ -217,8 +245,8 @@ static void __exit gb_exit(void)
 	gb_firmware_protocol_exit();
 	gb_svc_protocol_exit();
 	gb_control_protocol_exit();
-	gb_endo_exit();
 	gb_operation_exit();
+	gb_hd_exit();
 	bus_unregister(&greybus_bus_type);
 	gb_debugfs_cleanup();
 	tracepoint_synchronize_unregister();

@@ -23,6 +23,7 @@ enum gb_connection_state {
 
 struct gb_connection {
 	struct gb_host_device		*hd;
+	struct gb_interface		*intf;
 	struct gb_bundle		*bundle;
 	struct kref			kref;
 	u16				hd_cport_id;
@@ -42,6 +43,7 @@ struct gb_connection {
 	enum gb_connection_state	state;
 	struct list_head		operations;
 
+	char				name[16];
 	struct workqueue_struct		*wq;
 
 	atomic_t			op_cycle;
@@ -49,15 +51,17 @@ struct gb_connection {
 	void				*private;
 };
 
-int svc_update_connection(struct gb_interface *intf,
-			  struct gb_connection *connection);
-struct gb_connection *gb_connection_create(struct gb_bundle *bundle,
-				u16 cport_id, u8 protocol_id);
-struct gb_connection *gb_connection_create_range(struct gb_host_device *hd,
-			   struct gb_bundle *bundle, struct device *parent,
-			   u16 cport_id, u8 protocol_id, u32 ida_start,
-			   u32 ida_end);
+struct gb_connection *gb_connection_create_static(struct gb_host_device *hd,
+				u16 hd_cport_id, u8 protocol_id);
+struct gb_connection *gb_connection_create_dynamic(struct gb_interface *intf,
+				struct gb_bundle *bundle, u16 cport_id,
+				u8 protocol_id);
 void gb_connection_destroy(struct gb_connection *connection);
+
+static inline bool gb_connection_is_static(struct gb_connection *connection)
+{
+	return !connection->intf;
+}
 
 void greybus_data_rcvd(struct gb_host_device *hd, u16 cport_id,
 			u8 *data, size_t length);

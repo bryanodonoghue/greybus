@@ -158,6 +158,7 @@ struct gb_control_disconnected_request {
 #define GB_FIRMWARE_TYPE_GET_FIRMWARE		0x03
 #define GB_FIRMWARE_TYPE_READY_TO_BOOT		0x04
 #define GB_FIRMWARE_TYPE_AP_READY		0x05	/* Request with no-payload */
+#define GB_FIRMWARE_TYPE_GET_VID_PID		0x06	/* Request with no-payload */
 
 /* Greybus firmware boot stages */
 #define GB_FIRMWARE_BOOT_STAGE_ONE		0x01 /* Reserved for the boot ROM */
@@ -196,6 +197,12 @@ struct gb_firmware_ready_to_boot_request {
 	__u8			status;
 } __packed;
 /* Firmware protocol Ready to boot response has no payload */
+
+/* Firmware protocol get VID/PID request has no payload */
+struct gb_firmware_get_vid_pid_response {
+	__le32			vendor_id;
+	__le32			product_id;
+} __packed;
 
 
 /* Power Supply */
@@ -644,30 +651,29 @@ struct gb_pwm_disable_request {
 #define GB_SPI_FLAG_NO_TX		BIT(2)		/* can't do buffer write */
 
 /* Greybus spi operation types */
-#define GB_SPI_TYPE_MODE		0x02
-#define GB_SPI_TYPE_FLAGS		0x03
-#define GB_SPI_TYPE_BITS_PER_WORD_MASK	0x04
-#define GB_SPI_TYPE_NUM_CHIPSELECT	0x05
-#define GB_SPI_TYPE_TRANSFER		0x06
+#define GB_SPI_TYPE_MASTER_CONFIG	0x02
+#define GB_SPI_TYPE_DEVICE_CONFIG	0x03
+#define GB_SPI_TYPE_TRANSFER		0x04
 
 /* mode request has no payload */
-struct gb_spi_mode_response {
-	__le16	mode;
-} __packed;
-
-/* flags request has no payload */
-struct gb_spi_flags_response {
-	__le16	flags;
-} __packed;
-
-/* bits-per-word request has no payload */
-struct gb_spi_bpw_response {
+struct gb_spi_master_config_response {
 	__le32	bits_per_word_mask;
+	__le32	min_speed_hz;
+	__le32	max_speed_hz;
+	__le16	mode;
+	__le16	flags;
+	__le16	num_chipselect;
 } __packed;
 
-/* num-chipselects request has no payload */
-struct gb_spi_chipselect_response {
-	__le16	num_chipselect;
+struct gb_spi_device_config_request {
+	__le16	chip_select;
+} __packed;
+
+struct gb_spi_device_config_response {
+	__le16	mode;
+	__u8	bits_per_word;
+	__le32	max_speed_hz;
+	__u8	name[32];
 } __packed;
 
 /**
@@ -688,6 +694,9 @@ struct gb_spi_transfer {
 	__le16		delay_usecs;
 	__u8		cs_change;
 	__u8		bits_per_word;
+	__u8		rdwr;
+#define GB_SPI_XFER_READ	0x01
+#define GB_SPI_XFER_WRITE	0x02
 } __packed;
 
 struct gb_spi_transfer_request {
