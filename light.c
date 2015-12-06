@@ -456,6 +456,8 @@ static void gb_lights_led_operations_set(struct gb_channel *channel,
 
 #ifdef V4L2_HAVE_FLASH
 /* V4L2 specific helpers */
+static const struct v4l2_flash_ops v4l2_flash_ops;
+
 static void __gb_lights_channel_v4l2_config(struct led_flash_setting *channel_s,
 					    struct led_flash_setting *v4l2_s)
 {
@@ -507,7 +509,7 @@ static int gb_lights_light_v4l2_register(struct gb_light *light)
 		LED_FAULT_LED_OVER_TEMPERATURE;
 
 	light->v4l2_flash = v4l2_flash_init(dev, NULL, fled, iled,
-					    NULL, sd_cfg);
+					    &v4l2_flash_ops, sd_cfg);
 	if (IS_ERR_OR_NULL(light->v4l2_flash)) {
 		ret = PTR_ERR(light->v4l2_flash);
 		goto out_free;
@@ -679,9 +681,6 @@ static int __gb_lights_channel_torch_attach(struct gb_channel *channel,
 	kfree(channel->led->name);
 	channel->led->name = name;
 
-	/* free original torch channel resources */
-	gb_lights_channel_free(channel_torch);
-
 	channel_torch->led = channel->led;
 
 	return 0;
@@ -703,6 +702,7 @@ static int __gb_lights_flash_led_register(struct gb_channel *channel)
 	fset->min = channel->intensity_uA.min;
 	fset->max = channel->intensity_uA.max;
 	fset->step = channel->intensity_uA.step;
+	fset->val = channel->intensity_uA.max;
 
 	/* Only the flash mode have the timeout constraints settings */
 	if (channel->mode & GB_CHANNEL_MODE_FLASH) {
@@ -710,6 +710,7 @@ static int __gb_lights_flash_led_register(struct gb_channel *channel)
 		fset->min = channel->timeout_us.min;
 		fset->max = channel->timeout_us.max;
 		fset->step = channel->timeout_us.step;
+		fset->val = channel->timeout_us.max;
 	}
 
 	/*
