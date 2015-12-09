@@ -253,6 +253,39 @@ void gb_svc_connection_destroy(struct gb_svc *svc, u8 intf1_id, u16 cport1_id,
 }
 EXPORT_SYMBOL_GPL(gb_svc_connection_destroy);
 
+int gb_svc_timesync_enable(struct gb_svc *svc, u8 count, u64 frame_time,
+			   u32 strobe_delay, u32 strobe_mask, u32 refclk)
+{
+	struct gb_connection *connection = svc->connection;
+	struct gb_svc_timesync_enable_request request;
+
+	request.count = count;
+	request.frame_time = cpu_to_le64(frame_time);
+	request.strobe_delay = cpu_to_le32(strobe_delay);
+	request.strobe_mask = cpu_to_le32(strobe_mask);
+	request.refclk = cpu_to_le32(refclk);
+	return gb_operation_sync(connection,
+				 GB_SVC_TYPE_TIMESYNC_ENABLE,
+				 &request, sizeof(request), NULL, 0);
+}
+
+int gb_svc_timesync_disable(struct gb_svc *svc)
+{
+	struct gb_connection *connection = svc->connection;
+	return gb_operation_sync(connection,
+				 GB_SVC_TYPE_TIMESYNC_DISABLE,
+				 NULL, 0, NULL, 0);
+}
+
+int gb_svc_timesync_authoritative(struct gb_svc *svc,
+		struct gb_svc_timesync_authoritative_response *response)
+{
+	struct gb_connection *connection = svc->connection;
+	return gb_operation_sync(connection,
+				 GB_SVC_TYPE_TIMESYNC_AUTHORITATIVE, NULL, 0,
+				 response, sizeof(*response));
+}
+
 /* Creates bi-directional routes between the devices */
 static int gb_svc_route_create(struct gb_svc *svc, u8 intf1_id, u8 dev1_id,
 			       u8 intf2_id, u8 dev2_id)

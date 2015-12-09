@@ -29,6 +29,7 @@ struct gb_svc {
 	u8 ap_intf_id;
 };
 #define to_gb_svc(d) container_of(d, struct gb_svc, d)
+struct gb_svc_timesync_authoritative_response;
 
 struct gb_svc *gb_svc_create(struct gb_host_device *hd);
 int gb_svc_add(struct gb_svc *svc);
@@ -48,6 +49,11 @@ int gb_svc_intf_set_power_mode(struct gb_svc *svc, u8 intf_id, u8 hs_series,
 			       u8 tx_mode, u8 tx_gear, u8 tx_nlanes,
 			       u8 rx_mode, u8 rx_gear, u8 rx_nlanes,
 			       u8 flags, u32 quirks);
+int gb_svc_timesync_enable(struct gb_svc *svc, u8 count, u64 frame_time,
+			   u32 strobe_delay, u32 strobe_mask, u32 refclk);
+int gb_svc_timesync_disable(struct gb_svc *svc);
+int gb_svc_timesync_authoritative(struct gb_svc *svc,
+		struct gb_svc_timesync_authoritative_response *response);
 
 int gb_svc_protocol_init(void);
 void gb_svc_protocol_exit(void);
