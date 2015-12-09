@@ -140,6 +140,37 @@ void gb_control_destroy(struct gb_control *control)
 	kfree(control);
 }
 
+int gb_control_timesync_enable(struct gb_control *control, u8 count,
+			       u64 frame_time, u32 strobe_delay, u32 refclk)
+{
+	struct gb_control_timesync_enable_request request;
+
+	request.count = count;
+	request.frame_time = cpu_to_le64(frame_time);
+	request.strobe_delay = cpu_to_le32(strobe_delay);
+	request.refclk = cpu_to_le32(refclk);
+	return gb_operation_sync(control->connection,
+				 GB_CONTROL_TYPE_TIMESYNC_ENABLE, &request,
+				 sizeof(request), NULL, 0);
+}
+
+int gb_control_timesync_disable(struct gb_control *control)
+{
+	return gb_operation_sync(control->connection,
+				 GB_CONTROL_TYPE_TIMESYNC_DISABLE, NULL, 0,
+				 NULL, 0);
+}
+
+int gb_control_timesync_authoritative(struct gb_control *control,
+		struct gb_control_timesync_authoritative_request *request,
+		struct gb_control_timesync_authoritative_response *response)
+{
+	return gb_operation_sync(control->connection,
+				 GB_CONTROL_TYPE_TIMESYNC_AUTHORITATIVE,
+				 request, sizeof(*request),
+				 response, sizeof(*response));
+}
+
 static int gb_control_connection_init(struct gb_connection *connection)
 {
 	dev_dbg(&connection->intf->dev, "%s\n", __func__);

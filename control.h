@@ -13,6 +13,7 @@
 struct gb_control {
 	struct gb_connection	*connection;
 };
+struct gb_control_timesync_authoritative_request;
 
 struct gb_control *gb_control_create(struct gb_interface *intf);
 int gb_control_enable(struct gb_control *control);
@@ -25,6 +26,12 @@ int gb_control_get_manifest_size_operation(struct gb_interface *intf);
 int gb_control_get_manifest_operation(struct gb_interface *intf, void *manifest,
 				      size_t size);
 int gb_control_get_interface_version_operation(struct gb_interface *intf);
+int gb_control_timesync_enable(struct gb_control *control, u8 count,
+			       u64 frame_time, u32 strobe_delay, u32 refclk);
+int gb_control_timesync_disable(struct gb_control *control);
+int gb_control_timesync_authoritative(struct gb_control *control,
+		struct gb_control_timesync_authoritative_request *request,
+		struct gb_control_timesync_authoritative_response *response);
 
 int gb_control_protocol_init(void);
 void gb_control_protocol_exit(void);
