@@ -11,6 +11,11 @@
 
 #include "greybus.h"
 
+
+static int gb_connection_bind_protocol(struct gb_connection *connection);
+static void gb_connection_unbind_protocol(struct gb_connection *connection);
+
+
 static DEFINE_SPINLOCK(gb_connections_lock);
 
 /* This is only used at initialization time; no locking is required. */
@@ -119,7 +124,6 @@ gb_connection_create(struct gb_host_device *hd, int hd_cport_id,
 	struct gb_connection *connection;
 	struct ida *id_map = &hd->cport_id_map;
 	int ida_start, ida_end;
-	int retval;
 	u8 major = 0;
 	u8 minor = 1;
 
@@ -129,7 +133,7 @@ gb_connection_create(struct gb_host_device *hd, int hd_cport_id,
 	 * about holding the connection lock.
 	 */
 	if (bundle && gb_connection_intf_find(bundle->intf, cport_id)) {
-		dev_err(&bundle->dev, "cport 0x%04x already connected\n",
+		dev_err(&bundle->dev, "cport %u already connected\n",
 				cport_id);
 		return NULL;
 	}
@@ -187,14 +191,6 @@ gb_connection_create(struct gb_host_device *hd, int hd_cport_id,
 		INIT_LIST_HEAD(&connection->bundle_links);
 
 	spin_unlock_irq(&gb_connections_lock);
-
-	retval = gb_connection_bind_protocol(connection);
-	if (retval) {
-		dev_err(&hd->dev, "%s: failed to bind protocol: %d\n",
-			connection->name, retval);
-		gb_connection_destroy(connection);
-		return NULL;
-	}
 
 	return connection;
 
@@ -390,14 +386,17 @@ static int gb_connection_protocol_get_version(struct gb_connection *connection)
 	return 0;
 }
 
-static int gb_connection_init(struct gb_connection *connection)
+int gb_connection_init(struct gb_connection *connection)
 {
-	struct gb_protocol *protocol = connection->protocol;
 	int ret;
+
+	ret = gb_connection_bind_protocol(connection);
+	if (ret)
+		return ret;
 
 	ret = gb_connection_hd_cport_enable(connection);
 	if (ret)
-		return ret;
+		goto err_unbind_protocol;
 
 	ret = gb_connection_svc_connection_create(connection);
 	if (ret)
@@ -416,7 +415,7 @@ static int gb_connection_init(struct gb_connection *connection)
 	if (ret)
 		goto err_disconnect;
 
-	ret = protocol->connection_init(connection);
+	ret = connection->protocol->connection_init(connection);
 	if (ret)
 		goto err_disconnect;
 
@@ -432,15 +431,14 @@ err_svc_destroy:
 	gb_connection_svc_connection_destroy(connection);
 err_hd_cport_disable:
 	gb_connection_hd_cport_disable(connection);
+err_unbind_protocol:
+	gb_connection_unbind_protocol(connection);
 
 	return ret;
 }
 
-static void gb_connection_exit(struct gb_connection *connection)
+void gb_connection_exit(struct gb_connection *connection)
 {
-	if (!connection->protocol)
-		return;
-
 	spin_lock_irq(&connection->lock);
 	if (connection->state != GB_CONNECTION_STATE_ENABLED) {
 		spin_unlock_irq(&connection->lock);
@@ -455,6 +453,7 @@ static void gb_connection_exit(struct gb_connection *connection)
 	gb_connection_control_disconnected(connection);
 	gb_connection_svc_connection_destroy(connection);
 	gb_connection_hd_cport_disable(connection);
+	gb_connection_unbind_protocol(connection);
 }
 
 /*
@@ -473,10 +472,6 @@ void gb_connection_destroy(struct gb_connection *connection)
 	list_del(&connection->bundle_links);
 	list_del(&connection->hd_links);
 	spin_unlock_irq(&gb_connections_lock);
-
-	if (connection->protocol)
-		gb_protocol_put(connection->protocol);
-	connection->protocol = NULL;
 
 	id_map = &connection->hd->cport_id_map;
 	ida_simple_remove(id_map, connection->hd_cport_id);
@@ -520,33 +515,30 @@ void gb_connection_latency_tag_disable(struct gb_connection *connection)
 }
 EXPORT_SYMBOL_GPL(gb_connection_latency_tag_disable);
 
-int gb_connection_bind_protocol(struct gb_connection *connection)
+static int gb_connection_bind_protocol(struct gb_connection *connection)
 {
 	struct gb_protocol *protocol;
-	int ret;
-
-	/* If we already have a protocol bound here, just return */
-	if (connection->protocol)
-		return 0;
 
 	protocol = gb_protocol_get(connection->protocol_id,
 				   connection->major,
 				   connection->minor);
 	if (!protocol) {
-		dev_warn(&connection->hd->dev,
+		dev_err(&connection->hd->dev,
 				"protocol 0x%02x version %u.%u not found\n",
 				connection->protocol_id,
 				connection->major, connection->minor);
-		return 0;
+		return -EPROTONOSUPPORT;
 	}
 	connection->protocol = protocol;
 
-	ret = gb_connection_init(connection);
-	if (ret) {
-		gb_protocol_put(protocol);
-		connection->protocol = NULL;
-		return ret;
-	}
-
 	return 0;
+}
+
+static void gb_connection_unbind_protocol(struct gb_connection *connection)
+{
+	struct gb_protocol *protocol = connection->protocol;
+
+	gb_protocol_put(protocol);
+
+	connection->protocol = NULL;
 }

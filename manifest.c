@@ -228,6 +228,7 @@ static char *gb_string_get(struct gb_interface *intf, u8 string_id)
  */
 static u32 gb_manifest_parse_cports(struct gb_bundle *bundle)
 {
+	struct gb_connection *connection;
 	struct gb_interface *intf = bundle->intf;
 	struct manifest_desc *desc;
 	struct manifest_desc *next;
@@ -254,8 +255,10 @@ static u32 gb_manifest_parse_cports(struct gb_bundle *bundle)
 		/* Found one.  Set up its function structure */
 		protocol_id = desc_cport->protocol_id;
 
-		if (!gb_connection_create_dynamic(intf, bundle, cport_id,
-								protocol_id))
+		connection = gb_connection_create_dynamic(intf, bundle,
+								cport_id,
+								protocol_id);
+		if (!connection)
 			goto exit;
 
 		count++;
@@ -313,7 +316,7 @@ static u32 gb_manifest_parse_bundles(struct gb_interface *intf)
 		/* Nothing else should have its class set to control class */
 		if (class == GREYBUS_CLASS_CONTROL) {
 			dev_err(&intf->dev,
-				"bundle 0x%02x cannot use control class\n",
+				"bundle %u cannot use control class\n",
 				bundle_id);
 			goto cleanup;
 		}

@@ -21,6 +21,8 @@ static void gb_hd_release(struct device *dev)
 {
 	struct gb_host_device *hd = to_gb_host_device(dev);
 
+	if (hd->svc)
+		gb_svc_put(hd->svc);
 	ida_simple_remove(&gb_hd_bus_id_map, hd->bus_id);
 	ida_destroy(&hd->cport_id_map);
 	kfree(hd);
@@ -72,20 +74,12 @@ struct gb_host_device *gb_hd_create(struct gb_hd_driver *driver,
 	if (!hd)
 		return ERR_PTR(-ENOMEM);
 
-	hd->dev.parent = parent;
-	hd->dev.bus = &greybus_bus_type;
-	hd->dev.type = &greybus_hd_type;
-	hd->dev.dma_mask = hd->dev.parent->dma_mask;
-	device_initialize(&hd->dev);
-
 	ret = ida_simple_get(&gb_hd_bus_id_map, 1, 0, GFP_KERNEL);
 	if (ret < 0) {
 		kfree(hd);
 		return ERR_PTR(ret);
 	}
-
 	hd->bus_id = ret;
-	dev_set_name(&hd->dev, "greybus%d", hd->bus_id);
 
 	hd->driver = driver;
 	INIT_LIST_HEAD(&hd->interfaces);
@@ -94,21 +88,23 @@ struct gb_host_device *gb_hd_create(struct gb_hd_driver *driver,
 	hd->buffer_size_max = buffer_size_max;
 	hd->num_cports = num_cports;
 
+	hd->dev.parent = parent;
+	hd->dev.bus = &greybus_bus_type;
+	hd->dev.type = &greybus_hd_type;
+	hd->dev.dma_mask = hd->dev.parent->dma_mask;
+	device_initialize(&hd->dev);
+	dev_set_name(&hd->dev, "greybus%d", hd->bus_id);
+
+	hd->svc = gb_svc_create(hd);
+	if (!hd->svc) {
+		dev_err(&hd->dev, "failed to create svc\n");
+		put_device(&hd->dev);
+		return ERR_PTR(-ENOMEM);
+	}
+
 	return hd;
 }
 EXPORT_SYMBOL_GPL(gb_hd_create);
-
-static int gb_hd_create_svc_connection(struct gb_host_device *hd)
-{
-	hd->svc_connection = gb_connection_create_static(hd, GB_SVC_CPORT_ID,
-							GREYBUS_PROTOCOL_SVC);
-	if (!hd->svc_connection) {
-		dev_err(&hd->dev, "failed to create svc connection\n");
-		return -ENOMEM;
-	}
-
-	return 0;
-}
 
 int gb_hd_add(struct gb_host_device *hd)
 {
@@ -118,7 +114,7 @@ int gb_hd_add(struct gb_host_device *hd)
 	if (ret)
 		return ret;
 
-	ret = gb_hd_create_svc_connection(hd);
+	ret = gb_svc_add(hd->svc);
 	if (ret) {
 		device_del(&hd->dev);
 		return ret;
@@ -132,7 +128,7 @@ void gb_hd_del(struct gb_host_device *hd)
 {
 	gb_interfaces_remove(hd);
 
-	gb_connection_destroy(hd->svc_connection);
+	gb_svc_del(hd->svc);
 
 	device_del(&hd->dev);
 }
