@@ -22,6 +22,7 @@
 #include <linux/suspend.h>
 #include <linux/time.h>
 #include "arche_platform.h"
+#include "greybus.h"
 
 #include <linux/usb/usb3613.h>
 
@@ -57,17 +58,60 @@ struct arche_platform_drvdata {
 	int wake_detect_irq;
 	spinlock_t wake_detect_lock;		/* Protect wake_detect_state */
 	struct mutex platform_state_mutex;	/* Protect state */
+	wait_queue_head_t wq;			/* state-transiton wait-queue */
 	unsigned long wake_detect_start;
 	struct notifier_block pm_notifier;
 
 	struct device *dev;
 };
 
-/* Requires calling context to hold arche_pdata->spinlock */
+static irqreturn_t arche_platform_timesync_irq(int irq, void *devid);
+static irqreturn_t arche_platform_wd_irq(int irq, void *devid);
+static irqreturn_t arche_platform_wd_irq_thread(int irq, void *devid);
+
+static int arche_apb_bootret_assert(struct device *dev, void *data)
+{
+	apb_bootret_assert(dev);
+	return 0;
+}
+
+static int arche_apb_bootret_deassert(struct device *dev, void *data)
+{
+	apb_bootret_deassert(dev);
+	return 0;
+}
+
+/* Requires calling context to hold arche_pdata->platform_state_mutex */
 static void arche_platform_set_state(struct arche_platform_drvdata *arche_pdata,
 				     enum arche_platform_state state)
 {
 	arche_pdata->state = state;
+	if (state == ARCHE_PLATFORM_STATE_ACTIVE)
+		wake_up(&arche_pdata->wq);
+}
+
+static int arche_install_platform_irq(struct device *dev,
+				      struct arche_platform_drvdata *arche_pdata)
+{
+	return devm_request_threaded_irq(dev,
+					 arche_pdata->wake_detect_irq,
+					 arche_platform_wd_irq,
+					 arche_platform_wd_irq_thread,
+					 IRQF_TRIGGER_FALLING |
+					 IRQF_TRIGGER_RISING |
+					 IRQF_ONESHOT,
+					 dev_name(dev),
+					 arche_pdata);
+}
+
+static int arche_install_timesync_irq(struct device *dev,
+				      struct arche_platform_drvdata *arche_pdata)
+{
+	return devm_request_irq(dev,
+				arche_pdata->wake_detect_irq,
+				arche_platform_timesync_irq,
+				IRQF_TRIGGER_RISING, "time-sync",
+				arche_pdata);
 }
 
 /*
@@ -132,11 +176,33 @@ int arche_platform_change_state(enum arche_platform_state state)
 	}
 
 	switch (state) {
-	case ARCHE_PLATFORM_STATE_TIME_SYNC:
-		disable_irq(arche_pdata->wake_detect_irq);
-		break;
 	case ARCHE_PLATFORM_STATE_ACTIVE:
-		enable_irq(arche_pdata->wake_detect_irq);
+		if (arche_pdata->state != ARCHE_PLATFORM_STATE_TIME_SYNC) {
+			ret = -EINVAL;
+			goto exit;
+		}
+		disable_irq(arche_pdata->wake_detect_irq);
+		devm_free_irq(&pdev->dev, arche_pdata->wake_detect_irq,
+			      arche_pdata);
+		device_for_each_child(arche_pdata->dev, NULL,
+				      arche_apb_bootret_deassert);
+		ret = arche_install_platform_irq(&pdev->dev, arche_pdata);
+		if (ret)
+			goto irq_error;
+		break;
+	case ARCHE_PLATFORM_STATE_TIME_SYNC:
+		if (arche_pdata->state != ARCHE_PLATFORM_STATE_ACTIVE) {
+			ret = -EINVAL;
+			goto exit;
+		}
+		disable_irq(arche_pdata->wake_detect_irq);
+		devm_free_irq(&pdev->dev, arche_pdata->wake_detect_irq,
+			      arche_pdata);
+		device_for_each_child(arche_pdata->dev, NULL,
+				      arche_apb_bootret_assert);
+		ret = arche_install_timesync_irq(&pdev->dev, arche_pdata);
+		if (ret)
+			goto irq_error;
 		break;
 	case ARCHE_PLATFORM_STATE_OFF:
 	case ARCHE_PLATFORM_STATE_STANDBY:
@@ -151,6 +217,10 @@ int arche_platform_change_state(enum arche_platform_state state)
 	}
 	arche_platform_set_state(arche_pdata, state);
 	ret = 0;
+	goto exit;
+
+irq_error:
+	dev_err(&pdev->dev, "failed to request wake detect IRQ %d\n", ret);
 exit:
 	mutex_unlock(&arche_pdata->platform_state_mutex);
 	of_node_put(np);
@@ -214,6 +284,12 @@ static void assert_wakedetect(struct arche_platform_drvdata *arche_pdata)
 	/* Enable interrupt here, to read event back from SVC */
 	gpio_direction_input(arche_pdata->wake_detect_gpio);
 	enable_irq(arche_pdata->wake_detect_irq);
+}
+
+static irqreturn_t arche_platform_timesync_irq(int irq, void *devid)
+{
+	gb_timesync_irq();
+	return IRQ_HANDLED;
 }
 
 static irqreturn_t arche_platform_wd_irq_thread(int irq, void *devid)
@@ -397,7 +473,15 @@ static ssize_t state_store(struct device *dev,
 	struct arche_platform_drvdata *arche_pdata = platform_get_drvdata(pdev);
 	int ret = 0;
 
+retry:
 	mutex_lock(&arche_pdata->platform_state_mutex);
+	if (arche_pdata->state == ARCHE_PLATFORM_STATE_TIME_SYNC) {
+		mutex_unlock(&arche_pdata->platform_state_mutex);
+		wait_event_interruptible(
+			arche_pdata->wq,
+			arche_pdata->state != ARCHE_PLATFORM_STATE_TIME_SYNC);
+		goto retry;
+	}
 
 	if (sysfs_streq(buf, "off")) {
 		if (arche_pdata->state == ARCHE_PLATFORM_STATE_OFF)
@@ -592,14 +676,11 @@ static int arche_platform_probe(struct platform_device *pdev)
 
 	spin_lock_init(&arche_pdata->wake_detect_lock);
 	mutex_init(&arche_pdata->platform_state_mutex);
+	init_waitqueue_head(&arche_pdata->wq);
 	arche_pdata->wake_detect_irq =
 		gpio_to_irq(arche_pdata->wake_detect_gpio);
 
-	ret = devm_request_threaded_irq(dev, arche_pdata->wake_detect_irq,
-			arche_platform_wd_irq,
-			arche_platform_wd_irq_thread,
-			IRQF_TRIGGER_FALLING | IRQF_TRIGGER_RISING | IRQF_ONESHOT,
-			dev_name(dev), arche_pdata);
+	ret = arche_install_platform_irq(dev, arche_pdata);
 	if (ret) {
 		dev_err(dev, "failed to request wake detect IRQ %d\n", ret);
 		return ret;

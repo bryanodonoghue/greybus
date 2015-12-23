@@ -11,7 +11,11 @@ greybus-y :=	core.o		\
 		svc_watchdog.o	\
 		bootrom.o	\
 		operation.o	\
-		legacy.o
+		legacy.o	\
+		timesync.o
+greybus-$(CONFIG_X86)   += timesync_platform_x86.o
+greybus-$(CONFIG_ARM64) += timesync_platform_arm.o
+greybus-$(CONFIG_ARM)   += timesync_platform_arm.o
 
 gb-phy-y :=	gpbridge.o	\
 		sdio.o	\
