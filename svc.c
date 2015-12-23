@@ -842,6 +842,7 @@ static int gb_svc_hello(struct gb_operation *op)
 	}
 
 	gb_svc_debugfs_init(svc);
+	gb_timesync_svc_add(svc);
 
 	return gb_svc_queue_deferred_request(op);
 }
@@ -1558,6 +1559,7 @@ void gb_svc_del(struct gb_svc *svc)
 	 * from the request handler.
 	 */
 	if (device_is_registered(&svc->dev)) {
+		gb_timesync_svc_remove(svc);
 		gb_svc_debugfs_exit(svc);
 		gb_svc_watchdog_destroy(svc);
 		input_unregister_device(svc->input);
