@@ -17,7 +17,9 @@
 #include <linux/pinctrl/consumer.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
+#include <linux/interrupt.h>
 #include "arche_platform.h"
+#include "greybus.h"
 
 struct arche_platform_drvdata {
 	/* Control GPIO signals to and from AP <=> SVC */
@@ -25,6 +27,7 @@ struct arche_platform_drvdata {
 	bool is_reset_act_hi;
 	int svc_sysboot_gpio;
 	int wake_detect_gpio; /* bi-dir,maps to WAKE_MOD & WAKE_FRAME signals */
+	int time_sync_gpio;
 
 	unsigned int svc_refclk_req;
 	struct clk *svc_ref_clk;
@@ -37,6 +40,12 @@ struct arche_platform_drvdata {
 	struct delayed_work delayed_work;
 	struct device *dev;
 };
+
+static irqreturn_t arche_platform_timesync_irq(int irq, void *devid)
+{
+	gb_timesync_irq();
+	return IRQ_HANDLED;
+}
 
 static inline void svc_reset_onoff(unsigned int gpio, bool onoff)
 {
@@ -175,6 +184,24 @@ static int arche_platform_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	/* timesync gpio input */
+	arche_pdata->time_sync_gpio = of_get_named_gpio(np,
+					"svc,time-sync-gpio", 0);
+	if (arche_pdata->time_sync_gpio < 0) {
+		dev_err(dev, "failed to get time-sync gpio\n");
+		return arche_pdata->time_sync_gpio;
+	}
+	ret = devm_gpio_request(dev, arche_pdata->time_sync_gpio, "time-sync");
+	if (ret) {
+		dev_err(dev, "failed to request time-sync gpio: %d\n", ret);
+		return ret;
+	}
+	ret = gpio_direction_input(arche_pdata->time_sync_gpio);
+	if (ret) {
+		dev_err(dev, "failed to set time-sync gpio dir :%d\n", ret);
+		return ret;
+	}
+
 	/* setup refclk2 to follow the pin */
 	arche_pdata->svc_ref_clk = devm_clk_get(dev, "svc_ref_clk");
 	if (IS_ERR(arche_pdata->svc_ref_clk)) {
@@ -216,6 +243,15 @@ static int arche_platform_probe(struct platform_device *pdev)
 	schedule_delayed_work(&arche_pdata->delayed_work, msecs_to_jiffies(2000));
 
 	export_gpios(arche_pdata);
+
+	/* timesync irq */
+	ret = devm_request_irq(dev, gpio_to_irq(arche_pdata->time_sync_gpio),
+			       arche_platform_timesync_irq ,
+			       IRQF_TRIGGER_FALLING, "time sync", NULL);
+	if (ret) {
+		dev_err(dev, "failed to request time sync IRQ\n");
+		goto exit;
+	}
 
 	dev_info(dev, "Device registered successfully\n");
 	return 0;

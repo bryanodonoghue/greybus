@@ -9,7 +9,11 @@ greybus-y :=	core.o		\
 		control.o	\
 		svc.o		\
 		firmware.o	\
-		operation.o
+		operation.o	\
+		timesync.o
+greybus-$(CONFIG_X86)   += timesync_clock_x86.o
+greybus-$(CONFIG_ARM64) += timesync_clock_arm.o
+greybus-$(CONFIG_ARM)   += timesync_clock_arm.o
 
 gb-phy-y :=	gpbridge.o	\
 		sdio.o	\
