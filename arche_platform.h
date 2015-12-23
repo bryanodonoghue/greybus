@@ -28,5 +28,7 @@ int apb_ctrl_coldboot(struct device *dev);
 int apb_ctrl_fw_flashing(struct device *dev);
 int apb_ctrl_standby_boot(struct device *dev);
 void apb_ctrl_poweroff(struct device *dev);
+void apb_bootret_assert(struct device *dev);
+void apb_bootret_deassert(struct device *dev);
 
 #endif	/* __ARCHE_PLATFORM_H */
