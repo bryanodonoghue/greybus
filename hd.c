@@ -126,6 +126,7 @@ int gb_hd_add(struct gb_host_device *hd)
 		device_del(&hd->dev);
 		return ret;
 	}
+	gb_timesync_hd_add(hd);
 
 	return 0;
 }
@@ -137,6 +138,7 @@ void gb_hd_del(struct gb_host_device *hd)
 	 * Tear down the svc and flush any on-going hotplug processing before
 	 * removing the remaining interfaces.
 	 */
+	gb_timesync_hd_remove(hd);
 	gb_svc_del(hd->svc);
 
 	device_del(&hd->dev);

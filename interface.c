@@ -571,6 +571,12 @@ int gb_interface_add(struct gb_interface *intf)
 		return ret;
 	}
 
+	ret = gb_timesync_interface_add(intf);
+	if (ret) {
+		dev_err(&intf->dev, "failed to add to TimeSync set: %d\n", ret);
+		return ret;
+	}
+
 	dev_info(&intf->dev, "Interface added: VID=0x%08x, PID=0x%08x\n",
 		 intf->vendor_id, intf->product_id);
 	dev_info(&intf->dev, "DDBL1 Manufacturer=0x%08x, Product=0x%08x\n",
@@ -583,6 +589,7 @@ int gb_interface_add(struct gb_interface *intf)
 void gb_interface_remove(struct gb_interface *intf)
 {
 	if (device_is_registered(&intf->dev)) {
+		gb_timesync_interface_remove(intf);
 		device_del(&intf->dev);
 		dev_info(&intf->dev, "Interface removed\n");
 	}

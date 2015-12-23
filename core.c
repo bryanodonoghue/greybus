@@ -260,8 +260,15 @@ static int __init gb_init(void)
 		goto error_legacy;
 	}
 
+	retval = gb_timesync_init();
+	if (retval) {
+		pr_err("gb_timesync_init failed\n");
+		goto error_timesync;
+	}
 	return 0;	/* Success */
 
+error_timesync:
+	gb_legacy_exit();
 error_legacy:
 	gb_bootrom_exit();
 error_bootrom:
@@ -279,6 +286,7 @@ module_init(gb_init);
 
 static void __exit gb_exit(void)
 {
+	gb_timesync_exit();
 	gb_legacy_exit();
 	gb_bootrom_exit();
 	gb_operation_exit();
