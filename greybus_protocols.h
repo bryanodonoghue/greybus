@@ -160,6 +160,10 @@ struct gb_control_disconnected_request {
 #define GB_FIRMWARE_TYPE_AP_READY		0x05	/* Request with no-payload */
 #define GB_FIRMWARE_TYPE_GET_VID_PID		0x06	/* Request with no-payload */
 
+/* FIXME: remove all ES2-specific identifiers from the kernel */
+#define ES2_DDBL1_MFR_ID	0x00000126
+#define ES2_DDBL1_PROD_ID	0x00001000
+
 /* Greybus firmware boot stages */
 #define GB_FIRMWARE_BOOT_STAGE_ONE		0x01 /* Reserved for the boot ROM */
 #define GB_FIRMWARE_BOOT_STAGE_TWO		0x02 /* Firmware package to be loaded by the boot ROM */
@@ -726,6 +730,7 @@ struct gb_spi_transfer_response {
 #define GB_SVC_TYPE_DME_PEER_SET	0x0a
 #define GB_SVC_TYPE_ROUTE_CREATE	0x0b
 #define GB_SVC_TYPE_ROUTE_DESTROY	0x0c
+#define GB_SVC_TYPE_LINK_CONFIG		0x0d
 
 /*
  * SVC version request/response has the same payload as
@@ -748,8 +753,8 @@ struct gb_svc_intf_device_id_request {
 struct gb_svc_intf_hotplug_request {
 	__u8	intf_id;
 	struct {
-		__le32	unipro_mfg_id;
-		__le32	unipro_prod_id;
+		__le32	ddbl1_mfr_id;
+		__le32	ddbl1_prod_id;
 		__le32	ara_vend_id;
 		__le32	ara_prod_id;
 	} data;
@@ -806,16 +811,32 @@ struct gb_svc_dme_peer_set_response {
 	__le16	result_code;
 } __packed;
 
+#define GB_SVC_LINK_CONFIG_BURST_PWM		0
+#define GB_SVC_LINK_CONFIG_BURST_HS_A		1
+#define GB_SVC_LINK_CONFIG_BURST_HS_B		2
+#define GB_SVC_LINK_CONFIG_FLAG_AUTO_SLEEP	(1 << 0)
+
+struct gb_svc_link_config_request {
+	__u8 intf_id;
+	__u8 burst;
+	__u8 gear;
+	__u8 nlanes;
+	__u8 flags;
+} __packed;
+/* link config response has no payload */
+
 /* Attributes for peer get/set operations */
 #define DME_ATTR_SELECTOR_INDEX		0
+/* FIXME: remove ES2 support and DME_ATTR_T_TST_SRC_INCREMENT */
 #define DME_ATTR_T_TST_SRC_INCREMENT	0x4083
+#define DME_ATTR_ES3_INIT_STATUS		0x6101
 
-/* Return value from TST_SRC_INCREMENT */
-#define DME_TSI_SPI_BOOT_STARTED		0x02
-#define DME_TSI_TRUSTED_SPI_BOOT_FINISHED	0x03
-#define DME_TSI_UNTRUSTED_SPI_BOOT_FINISHED	0x04
-#define DME_TSI_UNIPRO_BOOT_STARTED		0x06
-#define DME_TSI_FALLBACK_UNIPRO_BOOT_STARTED	0x09
+/* Return value from init-status attributes listed above */
+#define DME_DIS_SPI_BOOT_STARTED		0x02
+#define DME_DIS_TRUSTED_SPI_BOOT_FINISHED	0x03
+#define DME_DIS_UNTRUSTED_SPI_BOOT_FINISHED	0x04
+#define DME_DIS_UNIPRO_BOOT_STARTED		0x06
+#define DME_DIS_FALLBACK_UNIPRO_BOOT_STARTED	0x09
 
 struct gb_svc_route_create_request {
 	__u8	intf1_id;
@@ -1143,18 +1164,18 @@ struct gb_camera_stream_config_response {
 struct gb_camera_configure_streams_response {
 	__le16 num_streams;
 #define GB_CAMERA_CONFIGURE_STREAMS_ADJUSTED	0x01
-	u8 flags;
-	u8 padding;
+	__u8 flags;
+	__u8 padding;
 	struct gb_camera_stream_config_response config[0];
 } __packed;
 
 /* Greybus Camera Capture request payload - response has no payload */
 struct gb_camera_capture_request {
 	__le32 request_id;
-	u8 streams;
-	u8 padding;
+	__u8 streams;
+	__u8 padding;
 	__le16 num_frames;
-	u8 settings[0];
+	__u8 settings[0];
 } __packed;
 
 /* Greybus Camera Flush response payload - request has no payload */
@@ -1168,7 +1189,7 @@ struct gb_camera_metadata_request {
 	__le16 frame_number;
 	__u8 stream;
 	__u8 padding;
-	u8 metadata[0];
+	__u8 metadata[0];
 } __packed;
 
 /* Lights */

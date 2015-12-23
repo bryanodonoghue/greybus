@@ -28,7 +28,8 @@ gb-light-y := light.o
 gb-raw-y := raw.o
 gb-hid-y := hid.o
 gb-es2-y := es2.o
-gb-db3-y := db3-platform.o
+gb-arche-y := arche-platform.o
+gb-arche-apb-ctrl-y := arche-apb-ctrl.o
 gb-audio-codec-y := audio-codec.o
 gb-camera-y := camera.o
 
@@ -41,7 +42,8 @@ obj-m += gb-light.o
 obj-m += gb-hid.o
 obj-m += gb-raw.o
 obj-m += gb-es2.o
-obj-m += gb-db3.o
+obj-m += gb-arche.o
+obj-m += gb-arche-apb-ctrl.o
 obj-m += gb-audio-codec.o
 obj-m += gb-camera.o
 
@@ -87,6 +89,9 @@ ccflags-y += -I$(src)
 
 all: module
 
+tools::
+	$(MAKE) -C tools KERNELDIR=$(realpath $(KERNELDIR))
+
 module:
 	$(MAKE) -C $(KERNELDIR) M=$(PWD)
 
@@ -97,6 +102,7 @@ clean:
 	rm -f *.o *~ core .depend .*.cmd *.ko *.mod.c
 	rm -f Module.markers Module.symvers modules.order
 	rm -rf .tmp_versions Modules.symvers
+	$(MAKE) -C tools clean
 
 coccicheck:
 	$(MAKE) -C $(KERNELDIR) M=$(PWD) coccicheck
