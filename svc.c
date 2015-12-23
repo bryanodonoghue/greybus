@@ -832,6 +832,7 @@ static int gb_svc_connection_init(struct gb_connection *connection)
 	struct gb_svc *svc = connection->private;
 
 	dev_dbg(&svc->dev, "%s\n", __func__);
+	gb_timesync_svc_add(svc);
 
 	return 0;
 }
@@ -840,6 +841,7 @@ static void gb_svc_connection_exit(struct gb_connection *connection)
 {
 	struct gb_svc *svc = connection->private;
 
+	gb_timesync_svc_remove(svc);
 	dev_dbg(&svc->dev, "%s\n", __func__);
 }
 

@@ -150,6 +150,8 @@ void gb_interface_remove(struct gb_interface *intf)
 	if (intf->disconnected)
 		gb_control_disable(intf->control);
 
+	gb_timesync_interface_remove(intf);
+
 	list_for_each_entry_safe(bundle, next, &intf->bundles, links)
 		gb_bundle_destroy(bundle);
 
@@ -253,7 +255,9 @@ int gb_interface_init(struct gb_interface *intf, u8 device_id)
 			gb_bundle_destroy(bundle);
 	}
 
-	ret = 0;
+	ret = gb_timesync_interface_add(intf);
+	if (ret)
+		gb_interface_remove(intf);
 
 free_manifest:
 	kfree(manifest);

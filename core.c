@@ -236,8 +236,15 @@ static int __init gb_init(void)
 		goto error_firmware;
 	}
 
+	retval = gb_timesync_init();
+	if (retval) {
+		pr_err("gb_timesync_init failed\n");
+		goto error_timesync;
+	}
 	return 0;	/* Success */
 
+error_timesync:
+	gb_timesync_exit();
 error_firmware:
 	gb_svc_protocol_exit();
 error_svc:
@@ -257,6 +264,7 @@ module_init(gb_init);
 
 static void __exit gb_exit(void)
 {
+	gb_timesync_exit();
 	gb_firmware_protocol_exit();
 	gb_svc_protocol_exit();
 	gb_control_protocol_exit();
