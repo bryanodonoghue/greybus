@@ -30,6 +30,10 @@ struct gb_interface {
 	u32 ddbl1_product_id;
 	u32 vendor_id;
 	u32 product_id;
+	u64 serial_number;
+
+	u16 version_major;
+	u16 version_minor;
 
 	struct gb_host_device *hd;
 

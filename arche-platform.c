@@ -23,6 +23,7 @@
 #include <linux/spinlock.h>
 #include <linux/regulator/consumer.h>
 #include <linux/pinctrl/consumer.h>
+#include "arche_platform.h"
 
 struct arche_platform_drvdata {
 	/* Control GPIO signals to and from AP <=> SVC */
@@ -42,6 +43,19 @@ struct arche_platform_drvdata {
 static inline void svc_reset_onoff(unsigned int gpio, bool onoff)
 {
 	gpio_set_value(gpio, onoff);
+}
+
+/* Export gpio's to user space */
+static void export_gpios(struct arche_platform_drvdata *arche_pdata)
+{
+	gpio_export(arche_pdata->svc_reset_gpio, false);
+	gpio_export(arche_pdata->svc_sysboot_gpio, false);
+}
+
+static void unexport_gpios(struct arche_platform_drvdata *arche_pdata)
+{
+	gpio_unexport(arche_pdata->svc_reset_gpio);
+	gpio_unexport(arche_pdata->svc_sysboot_gpio);
 }
 
 static void arche_platform_cleanup(struct arche_platform_drvdata *arche_pdata)
@@ -140,6 +154,8 @@ static int arche_platform_probe(struct platform_device *pdev)
 	arche_pdata->num_apbs = of_get_child_count(np);
 	dev_dbg(dev, "Number of APB's available - %d\n", arche_pdata->num_apbs);
 
+	export_gpios(arche_pdata);
+
 	/* probe all childs here */
 	ret = of_platform_populate(np, NULL, NULL, dev);
 	if (ret)
@@ -149,14 +165,26 @@ static int arche_platform_probe(struct platform_device *pdev)
 	return ret;
 }
 
+static int arche_remove_child(struct device *dev, void *unused)
+{
+	struct platform_device *pdev = to_platform_device(dev);
+
+	platform_device_unregister(pdev);
+
+	return 0;
+}
+
 static int arche_platform_remove(struct platform_device *pdev)
 {
 	struct arche_platform_drvdata *arche_pdata = platform_get_drvdata(pdev);
+
+	device_for_each_child(&pdev->dev, NULL, arche_remove_child);
 
 	if (arche_pdata)
 		arche_platform_cleanup(arche_pdata);
 
 	platform_set_drvdata(pdev, NULL);
+	unexport_gpios(arche_pdata);
 
 	return 0;
 }
@@ -197,7 +225,18 @@ static struct of_device_id arche_platform_of_match[] = {
 	{ .compatible = "google,arche-platform", }, /* Use PID/VID of SVC device */
 	{ },
 };
-MODULE_DEVICE_TABLE(of, arche_platform_of_match);
+
+static struct of_device_id arche_apb_ctrl_of_match[] = {
+	{ .compatible = "usbffff,2", },
+	{ },
+};
+
+static struct of_device_id arche_combined_id[] = {
+	{ .compatible = "google,arche-platform", }, /* Use PID/VID of SVC device */
+	{ .compatible = "usbffff,2", },
+	{ },
+};
+MODULE_DEVICE_TABLE(of, arche_combined_id);
 
 static struct platform_driver arche_platform_device_driver = {
 	.probe		= arche_platform_probe,
@@ -205,11 +244,42 @@ static struct platform_driver arche_platform_device_driver = {
 	.driver		= {
 		.name	= "arche-platform-ctrl",
 		.pm	= &arche_platform_pm_ops,
-		.of_match_table = of_match_ptr(arche_platform_of_match),
+		.of_match_table = arche_platform_of_match,
 	}
 };
 
-module_platform_driver(arche_platform_device_driver);
+static struct platform_driver arche_apb_ctrl_device_driver = {
+	.probe		= arche_apb_ctrl_probe,
+	.remove		= arche_apb_ctrl_remove,
+	.driver		= {
+		.name	= "arche-apb-ctrl",
+		.pm	= &arche_apb_ctrl_pm_ops,
+		.of_match_table = arche_apb_ctrl_of_match,
+	}
+};
+
+static int __init arche_init(void)
+{
+	int retval;
+
+	retval = platform_driver_register(&arche_platform_device_driver);
+	if (retval)
+		return retval;
+
+	retval = platform_driver_register(&arche_apb_ctrl_device_driver);
+	if (retval)
+		platform_driver_unregister(&arche_platform_device_driver);
+
+	return retval;
+}
+module_init(arche_init);
+
+static void __exit arche_exit(void)
+{
+	platform_driver_unregister(&arche_apb_ctrl_device_driver);
+	platform_driver_unregister(&arche_platform_device_driver);
+}
+module_exit(arche_exit);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Vaibhav Hiremath <vaibhav.hiremath@linaro.org>");

@@ -115,7 +115,7 @@ static int gb_camera_configure_streams(struct gb_camera *gcam,
 				GB_CAMERA_TYPE_CONFIGURE_STREAMS,
 				req, req_size, resp, resp_size);
 	if (ret < 0)
-		return ret;
+		goto done;
 
 	if (le16_to_cpu(resp->num_streams) > nstreams) {
 		gcam_dbg(gcam, "got #streams %u > request %u\n",
@@ -152,8 +152,8 @@ static int gb_camera_configure_streams(struct gb_camera *gcam,
 	if (nstreams && !(resp->flags & GB_CAMERA_CONFIGURE_STREAMS_ADJUSTED)) {
 		csi_cfg.csi_id = 1;
 		csi_cfg.clock_mode = 0;
-		csi_cfg.num_lanes = 2;
-		csi_cfg.bus_freq = 250000000;
+		csi_cfg.num_lanes = 4;
+		csi_cfg.bus_freq = 960000000;
 
 		ret = es2_ap_csi_setup(gcam->connection->hd, true, &csi_cfg);
 	} else if (nstreams == 0) {
@@ -183,6 +183,7 @@ static int gb_camera_capture(struct gb_camera *gcam, u32 request_id,
 {
 	struct gb_camera_capture_request *req;
 	size_t req_size;
+	int ret;
 
 	if (settings_size > GB_CAMERA_MAX_SETTINGS_SIZE)
 		return -EINVAL;
@@ -198,8 +199,12 @@ static int gb_camera_capture(struct gb_camera *gcam, u32 request_id,
 	req->num_frames = cpu_to_le16(num_frames);
 	memcpy(req->settings, settings, settings_size);
 
-	return gb_operation_sync(gcam->connection, GB_CAMERA_TYPE_CAPTURE,
+	ret = gb_operation_sync(gcam->connection, GB_CAMERA_TYPE_CAPTURE,
 				 req, req_size, NULL, 0);
+
+	kfree(req);
+
+	return ret;
 }
 
 static int gb_camera_flush(struct gb_camera *gcam, u32 *request_id)
@@ -599,6 +604,8 @@ static int gb_camera_connection_init(struct gb_connection *connection)
 	if (ret < 0)
 		goto error;
 
+	gcam->data_connected = true;
+
 	ret = gb_svc_link_config(svc, connection->intf->interface_id,
 				 GB_SVC_LINK_CONFIG_BURST_HS_A, 2, 2, 0);
 	if (ret < 0)
@@ -608,8 +615,6 @@ static int gb_camera_connection_init(struct gb_connection *connection)
 				 GB_SVC_LINK_CONFIG_BURST_HS_A, 2, 2, 0);
 	if (ret < 0)
 		goto error;
-
-	gcam->data_connected = true;
 
 	ret = gb_camera_debugfs_init(gcam);
 	if (ret < 0)
