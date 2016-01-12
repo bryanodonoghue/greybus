@@ -25,6 +25,7 @@ struct gb_power_supply_prop {
 
 struct gb_power_supply {
 	u8				id;
+	bool				registered;
 #ifdef DRIVER_OWNS_PSY_STRUCT
 	struct power_supply		psy;
 #define to_gb_power_supply(x) container_of(x, struct gb_power_supply, psy)
@@ -346,15 +347,13 @@ static int __gb_power_supply_property_strval_get(struct gb_power_supply *gbpsy,
 {
 	switch (psp) {
 	case POWER_SUPPLY_PROP_MODEL_NAME:
-		val->strval = kstrndup(gbpsy->model_name, PROP_MAX, GFP_KERNEL);
+		val->strval = gbpsy->model_name;
 		break;
 	case POWER_SUPPLY_PROP_MANUFACTURER:
-		val->strval = kstrndup(gbpsy->manufacturer, PROP_MAX,
-				       GFP_KERNEL);
+		val->strval = gbpsy->manufacturer;
 		break;
 	case POWER_SUPPLY_PROP_SERIAL_NUMBER:
-		val->strval = kstrndup(gbpsy->serial_number, PROP_MAX,
-				       GFP_KERNEL);
+		val->strval = gbpsy->serial_number;
 		break;
 	default:
 		break;
@@ -545,21 +544,20 @@ static void _gb_power_supply_free(struct gb_power_supply *gbpsy)
 	kfree(gbpsy->manufacturer);
 	kfree(gbpsy->props_raw);
 	kfree(gbpsy->props);
-	kfree(gbpsy);
 }
 
 static void _gb_power_supply_release(struct gb_power_supply *gbpsy)
 {
-	if (!gbpsy)
-		return;
 
 	gbpsy->update_interval = 0;
 
 	cancel_delayed_work_sync(&gbpsy->work);
 #ifdef DRIVER_OWNS_PSY_STRUCT
-	power_supply_unregister(&gbpsy->psy);
+	if (gbpsy->registered)
+		power_supply_unregister(&gbpsy->psy);
 #else
-	power_supply_unregister(gbpsy->psy);
+	if (gbpsy->registered)
+		power_supply_unregister(gbpsy->psy);
 #endif
 
 	_gb_power_supply_free(gbpsy);
@@ -569,10 +567,15 @@ static void _gb_power_supplies_release(struct gb_power_supplies *supplies)
 {
 	int i;
 
+	if (!supplies->supply)
+		return;
+
 	mutex_lock(&supplies->supplies_lock);
 	for (i = 0; i < supplies->supplies_count; i++)
 		_gb_power_supply_release(&supplies->supply[i]);
+	kfree(supplies->supply);
 	mutex_unlock(&supplies->supplies_lock);
+	kfree(supplies);
 }
 
 static int gb_power_supplies_get_count(struct gb_power_supplies *supplies)
@@ -625,6 +628,9 @@ static int gb_power_supply_config(struct gb_power_supplies *supplies, int id)
 	schedule_delayed_work(&gbpsy->work, 0);
 
 out:
+	/* if everything went fine just mark it for release code to know */
+	if (ret == 0)
+		gbpsy->registered = true;
 	return ret;
 }
 
@@ -644,8 +650,10 @@ static int gb_power_supplies_setup(struct gb_power_supplies *supplies)
 				     sizeof(struct gb_power_supply),
 				     GFP_KERNEL);
 
-	if (!supplies->supply)
-		return -ENOMEM;
+	if (!supplies->supply) {
+		ret = -ENOMEM;
+		goto out;
+	}
 
 	for (i = 0; i < supplies->supplies_count; i++) {
 		ret = gb_power_supply_config(supplies, i);
@@ -719,6 +727,7 @@ out_unlock:
 static int gb_power_supply_connection_init(struct gb_connection *connection)
 {
 	struct gb_power_supplies *supplies;
+	int ret;
 
 	supplies = kzalloc(sizeof(*supplies), GFP_KERNEL);
 	if (!supplies)
@@ -729,7 +738,11 @@ static int gb_power_supply_connection_init(struct gb_connection *connection)
 
 	mutex_init(&supplies->supplies_lock);
 
-	return gb_power_supplies_setup(supplies);
+	ret = gb_power_supplies_setup(supplies);
+	if (ret < 0)
+		_gb_power_supplies_release(supplies);
+
+	return ret;
 }
 
 static void gb_power_supply_connection_exit(struct gb_connection *connection)
