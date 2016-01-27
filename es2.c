@@ -20,7 +20,7 @@
 #include "greybus_trace.h"
 
 /* Memory sizes for the buffers sent to/from the ES2 controller */
-#define ES2_GBUF_MSG_SIZE_MAX	2048
+#define ES2_GBUF_MSG_SIZE_MAX			2048
 
 static const struct usb_device_id id_table[] = {
 	{ USB_DEVICE(0x18d1, 0x1eaf) },
@@ -28,41 +28,47 @@ static const struct usb_device_id id_table[] = {
 };
 MODULE_DEVICE_TABLE(usb, id_table);
 
-#define APB1_LOG_SIZE		SZ_16K
+#define APB1_LOG_SIZE				SZ_16K
 
 /* Number of bulk in and bulk out couple */
-#define NUM_BULKS		7
+#define NUM_BULKS				7
 
 /*
  * Number of CPort IN urbs in flight at any point in time.
  * Adjust if we are having stalls in the USB buffer due to not enough urbs in
  * flight.
  */
-#define NUM_CPORT_IN_URB	4
+#define NUM_CPORT_IN_URB			4
 
 /* Number of CPort OUT urbs in flight at any point in time.
  * Adjust if we get messages saying we are out of urbs in the system log.
  */
-#define NUM_CPORT_OUT_URB	(8 * NUM_BULKS)
+#define NUM_CPORT_OUT_URB			(8 * NUM_BULKS)
 
 /* vendor request APB1 log */
-#define REQUEST_LOG		0x02
+#define REQUEST_LOG				0x02
 
 /* vendor request to map a cport to bulk in and bulk out endpoints */
-#define REQUEST_EP_MAPPING	0x03
+#define REQUEST_EP_MAPPING			0x03
 
 /* vendor request to get the number of cports available */
-#define REQUEST_CPORT_COUNT	0x04
+#define REQUEST_CPORT_COUNT			0x04
 
 /* vendor request to reset a cport state */
-#define REQUEST_RESET_CPORT	0x05
+#define REQUEST_RESET_CPORT			0x05
 
 /* vendor request to time the latency of messages on a given cport */
-#define REQUEST_LATENCY_TAG_EN	0x06
-#define REQUEST_LATENCY_TAG_DIS	0x07
+#define REQUEST_LATENCY_TAG_EN			0x06
+#define REQUEST_LATENCY_TAG_DIS			0x07
 
 /* vendor request to control the CSI transmitter */
-#define REQUEST_CSI_TX_CONTROL	0x08
+#define REQUEST_CSI_TX_CONTROL			0x08
+
+/* TimeSync commands */
+#define REQUEST_TIMESYNC_ENABLE			0x09
+#define REQUEST_TIMESYNC_DISABLE		0x0A
+#define REQUEST_TIMESYNC_AUTHORITATIVE_OUT	0x0B
+#define REQUEST_TIMESYNC_AUTHORITATIVE_IN	0x0C
 
 /*
  * @endpoint: bulk in endpoint for CPort data
@@ -553,6 +559,79 @@ static int latency_tag_disable(struct gb_host_device *hd, u16 cport_id)
 	return retval;
 }
 
+static int timesync_enable(struct gb_host_device *hd, u8 count,
+			   u64 frame_time, u32 strobe_delay, u32 refclk)
+{
+	int retval;
+	struct es2_ap_dev *es2 = hd_to_es2(hd);
+	struct usb_device *udev = es2->usb_dev;
+	struct gb_control_timesync_enable_request request;
+
+	request.count = count;
+	request.frame_time = cpu_to_le64(frame_time);
+	request.strobe_delay = cpu_to_le32(strobe_delay);
+	request.refclk = cpu_to_le32(refclk);
+
+	retval = usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
+				 REQUEST_TIMESYNC_ENABLE,
+				 USB_DIR_OUT | USB_TYPE_VENDOR |
+				 USB_RECIP_INTERFACE, 0, 0, &request,
+				 sizeof(request), ES2_TIMEOUT);
+
+	if (retval < 0)
+		dev_err(&udev->dev, "Cannot enable timesync\n");
+
+	return retval;
+}
+
+static int timesync_disable(struct gb_host_device *hd)
+{
+	int retval;
+	struct es2_ap_dev *es2 = hd_to_es2(hd);
+	struct usb_device *udev = es2->usb_dev;
+
+	retval = usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
+				 REQUEST_TIMESYNC_DISABLE,
+				 USB_DIR_OUT | USB_TYPE_VENDOR |
+				 USB_RECIP_INTERFACE, 0, 0, NULL,
+				 0, ES2_TIMEOUT);
+
+	if (retval < 0)
+		dev_err(&udev->dev, "Cannot disable timesync\n");
+
+	return retval;
+}
+
+static int timesync_authoritative(struct gb_host_device *hd,
+		struct gb_control_timesync_authoritative_request *request,
+		struct gb_control_timesync_authoritative_response *response)
+{
+	int retval;
+	struct es2_ap_dev *es2 = hd_to_es2(hd);
+	struct usb_device *udev = es2->usb_dev;
+
+	retval = usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
+				 REQUEST_TIMESYNC_AUTHORITATIVE_OUT,
+				 USB_DIR_OUT | USB_TYPE_VENDOR |
+				 USB_RECIP_INTERFACE, 0, 0, request,
+				 sizeof(*request), ES2_TIMEOUT);
+
+	if (retval < 0) {
+		dev_err(&udev->dev, "Cannot timesync authoritative out\n");
+		return retval;
+	}
+	retval = usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
+				 REQUEST_TIMESYNC_AUTHORITATIVE_OUT,
+				 USB_DIR_OUT | USB_TYPE_VENDOR |
+				 USB_RECIP_INTERFACE, 0, 0, response,
+				 sizeof(*response), ES2_TIMEOUT);
+
+	if (retval < 0)
+		dev_err(&udev->dev, "Cannot timesync authoritative out\n");
+
+	return retval;
+}
+
 static struct gb_hd_driver es2_driver = {
 	.hd_priv_size		= sizeof(struct es2_ap_dev),
 	.message_send		= message_send,
@@ -560,6 +639,9 @@ static struct gb_hd_driver es2_driver = {
 	.cport_enable		= cport_enable,
 	.latency_tag_enable	= latency_tag_enable,
 	.latency_tag_disable	= latency_tag_disable,
+	.timesync_enable	= timesync_enable,
+	.timesync_disable	= timesync_disable,
+	.timesync_authoritative	= timesync_authoritative,
 };
 
 /* Common function to report consistent warnings based on URB status */

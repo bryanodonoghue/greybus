@@ -12,6 +12,8 @@
 
 struct gb_host_device;
 struct gb_message;
+struct gb_control_timesync_authoritative_request;
+struct gb_control_timesync_authoritative_response;
 
 struct gb_hd_driver {
 	size_t	hd_priv_size;
@@ -23,6 +25,12 @@ struct gb_hd_driver {
 	void (*message_cancel)(struct gb_message *message);
 	int (*latency_tag_enable)(struct gb_host_device *hd, u16 cport_id);
 	int (*latency_tag_disable)(struct gb_host_device *hd, u16 cport_id);
+	int (*timesync_enable)(struct gb_host_device *hd, u8 count,
+			       u64 frame_time, u32 strobe_delay, u32 refclk);
+	int (*timesync_disable)(struct gb_host_device *hd);
+	int (*timesync_authoritative)(struct gb_host_device *hd,
+		struct gb_control_timesync_authoritative_request *request,
+		struct gb_control_timesync_authoritative_response *response);
 };
 
 struct gb_host_device {
