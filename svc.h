@@ -16,6 +16,8 @@ enum gb_svc_state {
 	GB_SVC_STATE_SVC_HELLO,
 };
 
+struct gb_svc_watchdog;
+
 struct gb_svc {
 	struct device		dev;
 
@@ -27,6 +29,13 @@ struct gb_svc {
 
 	u16 endo_id;
 	u8 ap_intf_id;
+
+	u8 protocol_major;
+	u8 protocol_minor;
+
+	struct input_dev        *input;
+	char                    *input_phys;
+	struct gb_svc_watchdog	*watchdog;
 };
 #define to_gb_svc(d) container_of(d, struct gb_svc, d)
 
@@ -40,6 +49,7 @@ int gb_svc_connection_create(struct gb_svc *svc, u8 intf1_id, u16 cport1_id,
 			     u8 intf2_id, u16 cport2_id, bool boot_over_unipro);
 void gb_svc_connection_destroy(struct gb_svc *svc, u8 intf1_id, u16 cport1_id,
 			       u8 intf2_id, u16 cport2_id);
+int gb_svc_intf_eject(struct gb_svc *svc, u8 intf_id);
 int gb_svc_dme_peer_get(struct gb_svc *svc, u8 intf_id, u16 attr, u16 selector,
 			u32 *value);
 int gb_svc_dme_peer_set(struct gb_svc *svc, u8 intf_id, u16 attr, u16 selector,
@@ -48,6 +58,12 @@ int gb_svc_intf_set_power_mode(struct gb_svc *svc, u8 intf_id, u8 hs_series,
 			       u8 tx_mode, u8 tx_gear, u8 tx_nlanes,
 			       u8 rx_mode, u8 rx_gear, u8 rx_nlanes,
 			       u8 flags, u32 quirks);
+int gb_svc_ping(struct gb_svc *svc);
+int gb_svc_watchdog_create(struct gb_svc *svc);
+void gb_svc_watchdog_destroy(struct gb_svc *svc);
+bool gb_svc_watchdog_enabled(struct gb_svc *svc);
+int gb_svc_watchdog_enable(struct gb_svc *svc);
+int gb_svc_watchdog_disable(struct gb_svc *svc);
 
 int gb_svc_protocol_init(void);
 void gb_svc_protocol_exit(void);

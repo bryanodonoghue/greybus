@@ -13,11 +13,6 @@
 struct gb_connection;
 struct gb_operation;
 
-/* Possible flags for protocol drivers */
-#define GB_PROTOCOL_SKIP_CONTROL_CONNECTED	BIT(0)	/* Don't sent connected requests */
-#define GB_PROTOCOL_SKIP_CONTROL_DISCONNECTED	BIT(1)	/* Don't sent disconnected requests */
-#define GB_PROTOCOL_SKIP_VERSION		BIT(3)	/* Don't send get_version() requests */
-
 typedef int (*gb_connection_init_t)(struct gb_connection *);
 typedef void (*gb_connection_exit_t)(struct gb_connection *);
 typedef int (*gb_request_recv_t)(u8, struct gb_operation *);
@@ -32,7 +27,6 @@ struct gb_protocol {
 	u8			major;
 	u8			minor;
 	u8			count;
-	unsigned long		flags;
 
 	struct list_head	links;		/* global list */
 

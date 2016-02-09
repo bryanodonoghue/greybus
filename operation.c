@@ -47,7 +47,9 @@ static int gb_operation_get_active(struct gb_operation *operation)
 
 	spin_lock_irqsave(&connection->lock, flags);
 
-	if (connection->state != GB_CONNECTION_STATE_ENABLED) {
+	if (connection->state != GB_CONNECTION_STATE_ENABLED &&
+			connection->state != GB_CONNECTION_STATE_ENABLED_TX &&
+			!gb_operation_is_incoming(operation)) {
 		spin_unlock_irqrestore(&connection->lock, flags);
 		return -ENOTCONN;
 	}
@@ -218,15 +220,11 @@ static void gb_message_cancel(struct gb_message *message)
 static void gb_operation_request_handle(struct gb_operation *operation)
 {
 	struct gb_connection *connection = operation->connection;
-	struct gb_protocol *protocol = connection->protocol;
 	int status;
 	int ret;
 
-	if (!protocol)
-		return;
-
-	if (protocol->request_recv) {
-		status = protocol->request_recv(operation->type, operation);
+	if (connection->handler) {
+		status = connection->handler(operation);
 	} else {
 		dev_err(&connection->hd->dev,
 			"%s: unexpected incoming request of type 0x%02x\n",
@@ -910,7 +908,8 @@ void gb_connection_recv(struct gb_connection *connection,
 	size_t msg_size;
 	u16 operation_id;
 
-	if (connection->state != GB_CONNECTION_STATE_ENABLED) {
+	if (connection->state != GB_CONNECTION_STATE_ENABLED &&
+		connection->state != GB_CONNECTION_STATE_ENABLED_TX) {
 		dev_warn(dev, "%s: dropping %zu received bytes\n",
 				connection->name, size);
 		return;

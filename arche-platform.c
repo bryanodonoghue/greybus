@@ -52,7 +52,7 @@ static void svc_delayed_work(struct work_struct *work)
 		container_of(work, struct arche_platform_drvdata, delayed_work.work);
 	struct device *dev = arche_pdata->dev;
 	struct device_node *np = dev->of_node;
-	int timeout = 10;
+	int timeout = 50;
 	int ret;
 
 	/*
@@ -74,14 +74,16 @@ static void svc_delayed_work(struct work_struct *work)
 		if (gpio_get_value(arche_pdata->wake_detect_gpio) == 0)
 			break;
 
-		msleep(500);
+		msleep(100);
 	} while(timeout--);
 
 	if (timeout >= 0) {
 		ret = of_platform_populate(np, NULL, NULL, dev);
-		if (!ret)
-			/* Should we set wake_detect gpio to output again? */
+		if (!ret) {
+			/* re-assert wake_detect to confirm SVC WAKE_OUT */
+			gpio_direction_output(arche_pdata->wake_detect_gpio, 1);
 			return;
+		}
 	}
 
 	/* FIXME: We may want to limit retries here */
@@ -104,6 +106,7 @@ static void unexport_gpios(struct arche_platform_drvdata *arche_pdata)
 
 static void arche_platform_cleanup(struct arche_platform_drvdata *arche_pdata)
 {
+	clk_disable_unprepare(arche_pdata->svc_ref_clk);
 	/* As part of exit, put APB back in reset state */
 	svc_reset_onoff(arche_pdata->svc_reset_gpio,
 			arche_pdata->is_reset_act_hi);
@@ -190,10 +193,6 @@ static int arche_platform_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, arche_pdata);
 
-	/* bring SVC out of reset */
-	svc_reset_onoff(arche_pdata->svc_reset_gpio,
-			!arche_pdata->is_reset_act_hi);
-
 	arche_pdata->num_apbs = of_get_child_count(np);
 	dev_dbg(dev, "Number of APB's available - %d\n", arche_pdata->num_apbs);
 
@@ -210,6 +209,12 @@ static int arche_platform_probe(struct platform_device *pdev)
 				arche_pdata->wake_detect_gpio);
 		goto exit;
 	}
+	/* deassert wake detect */
+	gpio_direction_output(arche_pdata->wake_detect_gpio, 0);
+
+	/* bring SVC out of reset */
+	svc_reset_onoff(arche_pdata->svc_reset_gpio,
+			!arche_pdata->is_reset_act_hi);
 
 	arche_pdata->dev = &pdev->dev;
 	INIT_DELAYED_WORK(&arche_pdata->delayed_work, svc_delayed_work);

@@ -10,8 +10,10 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #define CREATE_TRACE_POINTS
+#include "firmware.h"
 #include "greybus.h"
 #include "greybus_trace.h"
+#include "legacy.h"
 
 EXPORT_TRACEPOINT_SYMBOL_GPL(gb_host_device_send);
 EXPORT_TRACEPOINT_SYMBOL_GPL(gb_host_device_recv);
@@ -110,6 +112,10 @@ static int greybus_uevent(struct device *dev, struct kobj_uevent_env *env)
 	if (intf) {
 		if (add_uevent_var(env, "INTERFACE=%u", intf->interface_id))
 			return -ENOMEM;
+		if (add_uevent_var(env, "GREYBUS_ID=%04x/%04x",
+				   (u16)(intf->vendor_id & 0xffff),
+				   (u16)(intf->product_id & 0xffff)))
+			return -ENOMEM;
 	}
 
 	if (bundle) {
@@ -119,6 +125,8 @@ static int greybus_uevent(struct device *dev, struct kobj_uevent_env *env)
 		// in gmod here as well
 
 		if (add_uevent_var(env, "BUNDLE=%u", bundle->id))
+			return -ENOMEM;
+		if (add_uevent_var(env, "BUNDLE_CLASS=%02x", bundle->class))
 			return -ENOMEM;
 	}
 
@@ -144,8 +152,14 @@ static int greybus_probe(struct device *dev)
 		return -ENODEV;
 
 	retval = driver->probe(bundle, id);
-	if (retval)
+	if (retval) {
+		/*
+		 * Catch buggy drivers that fail to destroy their connections.
+		 */
+		WARN_ON(!list_empty(&bundle->connections));
+
 		return retval;
+	}
 
 	return 0;
 }
@@ -154,8 +168,20 @@ static int greybus_remove(struct device *dev)
 {
 	struct greybus_driver *driver = to_greybus_driver(dev->driver);
 	struct gb_bundle *bundle = to_gb_bundle(dev);
+	struct gb_connection *connection;
+
+	list_for_each_entry(connection, &bundle->connections, bundle_links) {
+		if (bundle->intf->disconnected)
+			gb_connection_disable(connection);
+		else
+			gb_connection_disable_rx(connection);
+	}
 
 	driver->disconnect(bundle);
+
+	/* Catch buggy drivers that fail to destroy their connections. */
+	WARN_ON(!list_empty(&bundle->connections));
+
 	return 0;
 }
 
@@ -218,31 +244,23 @@ static int __init gb_init(void)
 		goto error_operation;
 	}
 
-	retval = gb_control_protocol_init();
+	retval = gb_firmware_init();
 	if (retval) {
-		pr_err("gb_control_protocol_init failed\n");
-		goto error_control;
-	}
-
-	retval = gb_svc_protocol_init();
-	if (retval) {
-		pr_err("gb_svc_protocol_init failed\n");
-		goto error_svc;
-	}
-
-	retval = gb_firmware_protocol_init();
-	if (retval) {
-		pr_err("gb_firmware_protocol_init failed\n");
+		pr_err("gb_firmware_init failed\n");
 		goto error_firmware;
+	}
+
+	retval = gb_legacy_init();
+	if (retval) {
+		pr_err("gb_legacy_init failed\n");
+		goto error_legacy;
 	}
 
 	return 0;	/* Success */
 
+error_legacy:
+	gb_firmware_exit();
 error_firmware:
-	gb_svc_protocol_exit();
-error_svc:
-	gb_control_protocol_exit();
-error_control:
 	gb_operation_exit();
 error_operation:
 	gb_hd_exit();
@@ -257,9 +275,8 @@ module_init(gb_init);
 
 static void __exit gb_exit(void)
 {
-	gb_firmware_protocol_exit();
-	gb_svc_protocol_exit();
-	gb_control_protocol_exit();
+	gb_legacy_exit();
+	gb_firmware_exit();
 	gb_operation_exit();
 	gb_hd_exit();
 	bus_unregister(&greybus_bus_type);

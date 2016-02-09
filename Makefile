@@ -8,8 +8,10 @@ greybus-y :=	core.o		\
 		protocol.o	\
 		control.o	\
 		svc.o		\
+		svc_watchdog.o	\
 		firmware.o	\
-		operation.o
+		operation.o	\
+		legacy.o
 
 gb-phy-y :=	gpbridge.o	\
 		sdio.o	\
@@ -29,7 +31,11 @@ gb-raw-y := raw.o
 gb-hid-y := hid.o
 gb-es2-y := es2.o
 gb-arche-y := arche-platform.o arche-apb-ctrl.o
-gb-audio-codec-y := audio-codec.o
+gb-audio-codec-y := audio_codec.o audio_topology.o
+gb-audio-gb-y := audio_gb.o
+gb-audio-apbridgea-y := audio_apbridgea.o
+gb-audio-manager-y += audio_manager.o
+gb-audio-manager-y += audio_manager_module.o
 gb-camera-y := camera.o
 
 obj-m += greybus.o
@@ -42,8 +48,15 @@ obj-m += gb-hid.o
 obj-m += gb-raw.o
 obj-m += gb-es2.o
 obj-m += gb-arche.o
-obj-m += gb-audio-codec.o
-obj-m += gb-camera.o
+ifeq ($(CONFIG_SND_SOC_DYNAMIC_DAILINK),y)
+ obj-m += gb-audio-codec.o
+endif
+ifeq ($(CONFIG_ARCH_MSM8994),y)
+ obj-m += gb-camera.o
+endif
+obj-m += gb-audio-gb.o
+obj-m += gb-audio-apbridgea.o
+obj-m += gb-audio-manager.o
 
 KERNELVER		?= $(shell uname -r)
 KERNELDIR 		?= /lib/modules/$(KERNELVER)/build
@@ -51,7 +64,7 @@ INSTALL_MOD_PATH	?= /..
 PWD			:= $(shell pwd)
 
 # kernel config option that shall be enable
-CONFIG_OPTIONS_ENABLE := POWER_SUPPLY PWM SYSFS SPI USB SND_SOC MMC LEDS_CLASS
+CONFIG_OPTIONS_ENABLE := POWER_SUPPLY PWM SYSFS SPI USB SND_SOC MMC LEDS_CLASS INPUT
 
 # kernel config option that shall be disable
 CONFIG_OPTIONS_DISABLE :=
@@ -84,6 +97,12 @@ ccflags-y := -Wall
 
 # needed for trace events
 ccflags-y += -I$(src)
+
+GB_AUDIO_MANAGER_SYSFS ?= true
+ifeq ($(GB_AUDIO_MANAGER_SYSFS),true)
+gb-audio-manager-y += audio_manager_sysfs.o
+ccflags-y += -DGB_AUDIO_MANAGER_SYSFS
+endif
 
 all: module
 

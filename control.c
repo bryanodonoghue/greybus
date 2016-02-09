@@ -12,6 +12,96 @@
 #include <linux/slab.h>
 #include "greybus.h"
 
+/* Highest control-protocol version supported */
+#define GB_CONTROL_VERSION_MAJOR	0
+#define GB_CONTROL_VERSION_MINOR	1
+
+
+static int gb_control_get_version(struct gb_control *control)
+{
+	struct gb_interface *intf = control->connection->intf;
+	struct gb_control_version_request request;
+	struct gb_control_version_response response;
+	int ret;
+
+	request.major = GB_CONTROL_VERSION_MAJOR;
+	request.minor = GB_CONTROL_VERSION_MINOR;
+
+	ret = gb_operation_sync(control->connection,
+				GB_CONTROL_TYPE_VERSION,
+				&request, sizeof(request), &response,
+				sizeof(response));
+	if (ret) {
+		dev_err(&intf->dev,
+				"failed to get control-protocol version: %d\n",
+				ret);
+		return ret;
+	}
+
+	if (response.major > request.major) {
+		dev_err(&intf->dev,
+				"unsupported major control-protocol version (%u > %u)\n",
+				response.major, request.major);
+		return -ENOTSUPP;
+	}
+
+	control->protocol_major = response.major;
+	control->protocol_minor = response.minor;
+
+	dev_dbg(&intf->dev, "%s - %u.%u\n", __func__, response.major,
+			response.minor);
+
+	return 0;
+}
+
+static int gb_control_get_bundle_version(struct gb_control *control,
+						struct gb_bundle *bundle)
+{
+	struct gb_interface *intf = control->connection->intf;
+	struct gb_control_bundle_version_request request;
+	struct gb_control_bundle_version_response response;
+	int ret;
+
+	request.bundle_id = bundle->id;
+
+	ret = gb_operation_sync(control->connection,
+				GB_CONTROL_TYPE_BUNDLE_VERSION,
+				&request, sizeof(request),
+				&response, sizeof(response));
+	if (ret) {
+		dev_err(&intf->dev,
+				"failed to get bundle %u class version: %d\n",
+				bundle->id, ret);
+		return ret;
+	}
+
+	bundle->class_major = response.major;
+	bundle->class_minor = response.minor;
+
+	dev_dbg(&intf->dev, "%s - %u: %u.%u\n", __func__, bundle->id,
+			response.major, response.minor);
+
+	return 0;
+}
+
+int gb_control_get_bundle_versions(struct gb_control *control)
+{
+	struct gb_interface *intf = control->connection->intf;
+	struct gb_bundle *bundle;
+	int ret;
+
+	if (!control->has_bundle_version)
+		return 0;
+
+	list_for_each_entry(bundle, &intf->bundles, links) {
+		ret = gb_control_get_bundle_version(control, bundle);
+		if (ret)
+			return ret;
+	}
+
+	return 0;
+}
+
 /* Get Manifest's size from the interface */
 int gb_control_get_manifest_size_operation(struct gb_interface *intf)
 {
@@ -96,11 +186,11 @@ struct gb_control *gb_control_create(struct gb_interface *intf)
 	if (!control)
 		return NULL;
 
-	control->connection = gb_connection_create_dynamic(intf, NULL,
-						GB_CONTROL_CPORT_ID,
-						GREYBUS_PROTOCOL_CONTROL);
-	if (!control->connection) {
-		dev_err(&intf->dev, "failed to create control connection\n");
+	control->connection = gb_connection_create_control(intf);
+	if (IS_ERR(control->connection)) {
+		dev_err(&intf->dev,
+				"failed to create control connection: %ld\n",
+				PTR_ERR(control->connection));
 		kfree(control);
 		return NULL;
 	}
@@ -116,7 +206,7 @@ int gb_control_enable(struct gb_control *control)
 
 	dev_dbg(&control->connection->intf->dev, "%s\n", __func__);
 
-	ret = gb_connection_init(control->connection);
+	ret = gb_connection_enable_tx(control->connection);
 	if (ret) {
 		dev_err(&control->connection->intf->dev,
 				"failed to enable control connection: %d\n",
@@ -124,14 +214,26 @@ int gb_control_enable(struct gb_control *control)
 		return ret;
 	}
 
+	ret = gb_control_get_version(control);
+	if (ret)
+		goto err_disable_connection;
+
+	if (control->protocol_major > 0 || control->protocol_minor > 1)
+		control->has_bundle_version = true;
+
 	return 0;
+
+err_disable_connection:
+	gb_connection_disable(control->connection);
+
+	return ret;
 }
 
 void gb_control_disable(struct gb_control *control)
 {
 	dev_dbg(&control->connection->intf->dev, "%s\n", __func__);
 
-	gb_connection_exit(control->connection);
+	gb_connection_disable(control->connection);
 }
 
 void gb_control_destroy(struct gb_control *control)
@@ -139,27 +241,3 @@ void gb_control_destroy(struct gb_control *control)
 	gb_connection_destroy(control->connection);
 	kfree(control);
 }
-
-static int gb_control_connection_init(struct gb_connection *connection)
-{
-	dev_dbg(&connection->intf->dev, "%s\n", __func__);
-
-	return 0;
-}
-
-static void gb_control_connection_exit(struct gb_connection *connection)
-{
-	dev_dbg(&connection->intf->dev, "%s\n", __func__);
-}
-
-static struct gb_protocol control_protocol = {
-	.name			= "control",
-	.id			= GREYBUS_PROTOCOL_CONTROL,
-	.major			= GB_CONTROL_VERSION_MAJOR,
-	.minor			= GB_CONTROL_VERSION_MINOR,
-	.connection_init	= gb_control_connection_init,
-	.connection_exit	= gb_control_connection_exit,
-	.flags			= GB_PROTOCOL_SKIP_CONTROL_CONNECTED |
-				  GB_PROTOCOL_SKIP_CONTROL_DISCONNECTED,
-};
-gb_builtin_protocol_driver(control_protocol);

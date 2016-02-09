@@ -16,7 +16,7 @@
 #include <linux/uaccess.h>
 #include <linux/vmalloc.h>
 
-#include "es2.h"
+#include "gb-camera.h"
 #include "greybus.h"
 #include "greybus_protocols.h"
 
@@ -58,6 +58,39 @@ struct gb_camera_stream_config {
 	unsigned int max_size;
 };
 
+struct gb_camera_fmt_map {
+	enum v4l2_mbus_pixelcode mbus_code;
+	unsigned int gb_format;
+};
+
+/* GB format to media code map */
+static const struct gb_camera_fmt_map mbus_to_gbus_format[] = {
+	{
+		.mbus_code = V4L2_MBUS_FMT_UYVY8_1X16,
+		.gb_format = 0x01,
+	},
+	{
+		.mbus_code = V4L2_MBUS_FMT_NV12_1x8,
+		.gb_format = 0x12,
+	},
+	{
+		.mbus_code = V4L2_MBUS_FMT_NV21_1x8,
+		.gb_format = 0x13,
+	},
+	{
+		.mbus_code = V4L2_MBUS_FMT_YU12_1x8,
+		.gb_format = 0x16,
+	},
+	{
+		.mbus_code = V4L2_MBUS_FMT_YV12_1x8,
+		.gb_format = 0x17,
+	},
+	{
+		.mbus_code = V4L2_MBUS_FMT_JPEG_1X8,
+		.gb_format = 0x40,
+	}
+};
+
 #define ES2_APB_CDSI0_CPORT		16
 #define ES2_APB_CDSI1_CPORT		17
 
@@ -74,14 +107,26 @@ struct gb_camera_stream_config {
  * Camera Protocol Operations
  */
 
+struct ap_csi_config_request {
+	__u8 csi_id;
+	__u8 clock_mode;
+	__u8 num_lanes;
+	__u8 padding;
+	__le32 bus_freq;
+} __packed;
+
 static int gb_camera_configure_streams(struct gb_camera *gcam,
-				       unsigned int nstreams,
-				       unsigned int flags,
+				       unsigned int *num_streams,
+				       unsigned int *flags,
 				       struct gb_camera_stream_config *streams)
 {
+	struct gb_interface *intf = gcam->connection->intf;
+	struct gb_svc *svc = gcam->connection->hd->svc;
 	struct gb_camera_configure_streams_request *req;
 	struct gb_camera_configure_streams_response *resp;
-	struct es2_ap_csi_config csi_cfg;
+	struct ap_csi_config_request csi_cfg;
+
+	unsigned int nstreams = *num_streams;
 	unsigned int i;
 	size_t req_size;
 	size_t resp_size;
@@ -100,8 +145,59 @@ static int gb_camera_configure_streams(struct gb_camera *gcam,
 		goto done;
 	}
 
+	/*
+	 * Setup unipro link speed before actually issuing configuration
+	 * to the camera module, to assure unipro network speed is set
+	 * before CSI interfaces gets configured
+	 */
+	if (nstreams && !(*flags & GB_CAMERA_CONFIGURE_STREAMS_TEST_ONLY)) {
+		ret = gb_svc_intf_set_power_mode(svc, intf->interface_id,
+						 GB_SVC_UNIPRO_HS_SERIES_A,
+						 GB_SVC_UNIPRO_FAST_MODE, 2, 2,
+						 GB_SVC_UNIPRO_FAST_MODE, 2, 2,
+						 GB_SVC_PWRM_RXTERMINATION |
+						 GB_SVC_PWRM_TXTERMINATION, 0);
+		if (ret < 0)
+			goto done;
+
+		ret = gb_svc_intf_set_power_mode(svc, svc->ap_intf_id,
+						 GB_SVC_UNIPRO_HS_SERIES_A,
+						 GB_SVC_UNIPRO_FAST_MODE, 2, 2,
+						 GB_SVC_UNIPRO_FAST_MODE, 2, 2,
+						 GB_SVC_PWRM_RXTERMINATION |
+						 GB_SVC_PWRM_TXTERMINATION, 0);
+		if (ret < 0)
+			goto done;
+	} else if (nstreams == 0) {
+		ret = gb_svc_intf_set_power_mode(svc, intf->interface_id,
+						 GB_SVC_UNIPRO_HS_SERIES_A,
+						 GB_SVC_UNIPRO_SLOW_AUTO_MODE,
+						 1, 2,
+						 GB_SVC_UNIPRO_SLOW_AUTO_MODE,
+						 1, 2,
+						 0, 0);
+		if (ret < 0) {
+			gcam_err(gcam, "can't take camera link to PWM-G1 auto: %d\n",
+				 ret);
+			goto done;
+		}
+
+		ret = gb_svc_intf_set_power_mode(svc, svc->ap_intf_id,
+						 GB_SVC_UNIPRO_HS_SERIES_A,
+						 GB_SVC_UNIPRO_SLOW_AUTO_MODE,
+						 1, 2,
+						 GB_SVC_UNIPRO_SLOW_AUTO_MODE,
+						 1, 2,
+						 0, 0);
+		if (ret < 0) {
+			gcam_err(gcam, "can't take AP link to PWM-G1 auto: %d\n",
+				 ret);
+			goto done;
+		}
+	}
+
 	req->num_streams = nstreams;
-	req->flags = flags;
+	req->flags = *flags;
 	req->padding = 0;
 
 	for (i = 0; i < nstreams; ++i) {
@@ -117,19 +213,19 @@ static int gb_camera_configure_streams(struct gb_camera *gcam,
 				GB_CAMERA_TYPE_CONFIGURE_STREAMS,
 				req, req_size, resp, resp_size);
 	if (ret < 0)
-		goto done;
+		goto set_unipro_slow_mode;
 
 	if (resp->num_streams > nstreams) {
 		gcam_dbg(gcam, "got #streams %u > request %u\n",
 			 resp->num_streams, nstreams);
 		ret = -EIO;
-		goto done;
+		goto set_unipro_slow_mode;
 	}
 
 	if (resp->padding != 0) {
 		gcam_dbg(gcam, "response padding != 0");
 		ret = -EIO;
-		goto done;
+		goto set_unipro_slow_mode;
 	}
 
 	for (i = 0; i < nstreams; ++i) {
@@ -146,32 +242,70 @@ static int gb_camera_configure_streams(struct gb_camera *gcam,
 		if (cfg->padding[0] || cfg->padding[1] || cfg->padding[2]) {
 			gcam_dbg(gcam, "stream #%u padding != 0", i);
 			ret = -EIO;
-			goto done;
+			goto set_unipro_slow_mode;
 		}
 	}
 
+	if (nstreams && resp->flags & GB_CAMERA_CONFIGURE_STREAMS_ADJUSTED) {
+		*flags = resp->flags;
+		*num_streams = resp->num_streams;
+		goto set_unipro_slow_mode;
+	}
+
+	memset(&csi_cfg, 0, sizeof(csi_cfg));
+
 	/* Configure the CSI transmitter. Hardcode the parameters for now. */
-	if (nstreams && !(resp->flags & GB_CAMERA_CONFIGURE_STREAMS_ADJUSTED)) {
+	if (nstreams) {
 		csi_cfg.csi_id = 1;
 		csi_cfg.clock_mode = 0;
 		csi_cfg.num_lanes = 4;
-		csi_cfg.bus_freq = 960000000;
-
-		ret = es2_ap_csi_setup(gcam->connection->hd, true, &csi_cfg);
-	} else if (nstreams == 0) {
+		csi_cfg.bus_freq = cpu_to_le32(960000000);
+		ret = gb_hd_output(gcam->connection->hd, &csi_cfg,
+				   sizeof(csi_cfg),
+				   GB_APB_REQUEST_CSI_TX_CONTROL, false);
+	} else {
 		csi_cfg.csi_id = 1;
-		csi_cfg.clock_mode = 0;
-		csi_cfg.num_lanes = 0;
-		csi_cfg.bus_freq = 0;
-
-		ret = es2_ap_csi_setup(gcam->connection->hd, false, &csi_cfg);
+		ret = gb_hd_output(gcam->connection->hd, &csi_cfg,
+				   sizeof(csi_cfg),
+				   GB_APB_REQUEST_CSI_TX_CONTROL, false);
 	}
 
 	if (ret < 0)
 		gcam_err(gcam, "failed to %s the CSI transmitter\n",
 			 nstreams ? "start" : "stop");
 
-	ret = resp->num_streams;
+	*flags = resp->flags;
+	*num_streams = resp->num_streams;
+	ret = 0;
+
+	kfree(req);
+	kfree(resp);
+	return ret;
+
+set_unipro_slow_mode:
+	ret = gb_svc_intf_set_power_mode(svc, intf->interface_id,
+					 GB_SVC_UNIPRO_HS_SERIES_A,
+					 GB_SVC_UNIPRO_SLOW_AUTO_MODE,
+					 1, 2,
+					 GB_SVC_UNIPRO_SLOW_AUTO_MODE,
+					 1, 2,
+					 0, 0);
+	if (ret < 0) {
+		gcam_err(gcam, "can't take camera link to PWM-G1 auto: %d\n",
+			 ret);
+		goto done;
+	}
+
+	ret = gb_svc_intf_set_power_mode(svc, svc->ap_intf_id,
+				   GB_SVC_UNIPRO_HS_SERIES_A,
+				   GB_SVC_UNIPRO_SLOW_AUTO_MODE,
+				   1, 2,
+				   GB_SVC_UNIPRO_SLOW_AUTO_MODE,
+				   1, 2,
+				   0, 0);
+	if (ret < 0)
+		gcam_err(gcam, "can't take AP link to PWM-G1 auto: %d\n",
+			 ret);
 
 done:
 	kfree(req);
@@ -253,6 +387,112 @@ static int gb_camera_event_recv(u8 type, struct gb_operation *op)
 }
 
 /* -----------------------------------------------------------------------------
+ * Interface with HOST ara camera.
+ */
+static unsigned int gb_camera_mbus_to_gb(enum v4l2_mbus_pixelcode mbus_code)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(mbus_to_gbus_format); i++) {
+		if (mbus_to_gbus_format[i].mbus_code == mbus_code)
+			return mbus_to_gbus_format[i].gb_format;
+	}
+	return mbus_to_gbus_format[0].gb_format;
+}
+
+static enum v4l2_mbus_pixelcode gb_camera_gb_to_mbus(u16 gb_fmt)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(mbus_to_gbus_format); i++) {
+		if (mbus_to_gbus_format[i].gb_format == gb_fmt)
+			return mbus_to_gbus_format[i].mbus_code;
+	}
+	return mbus_to_gbus_format[0].mbus_code;
+}
+
+static int gb_camera_op_configure_streams(void *priv, unsigned int *nstreams,
+		unsigned int *flags, struct gb_camera_stream *streams)
+{
+	struct gb_camera *gcam = priv;
+	struct gb_camera_stream_config *gb_streams;
+	unsigned int gb_flags = 0;
+	unsigned int gb_nstreams = *nstreams;
+	unsigned int i;
+	int ret;
+
+	if (gb_nstreams > GB_CAMERA_MAX_STREAMS)
+		return -EINVAL;
+
+	gb_streams = kzalloc(gb_nstreams * sizeof(*gb_streams), GFP_KERNEL);
+	if (!gb_streams)
+		return -ENOMEM;
+
+	for (i = 0; i < gb_nstreams; i++) {
+		gb_streams[i].width = streams[i].width;
+		gb_streams[i].height = streams[i].height;
+		gb_streams[i].format =
+			gb_camera_mbus_to_gb(streams[i].pixel_code);
+	}
+
+	if (*flags & GB_CAMERA_IN_FLAG_TEST)
+		gb_flags |= GB_CAMERA_CONFIGURE_STREAMS_TEST_ONLY;
+
+	ret = gb_camera_configure_streams(gcam, &gb_nstreams,
+					  &gb_flags, gb_streams);
+	if (ret < 0)
+		goto done;
+	if (gb_nstreams > *nstreams) {
+		ret = -EINVAL;
+		goto done;
+	}
+
+	*flags = 0;
+	if (gb_flags & GB_CAMERA_CONFIGURE_STREAMS_ADJUSTED)
+		*flags |= GB_CAMERA_OUT_FLAG_ADJUSTED;
+
+	for (i = 0; i < gb_nstreams; i++) {
+		streams[i].width = gb_streams[i].width;
+		streams[i].height = gb_streams[i].height;
+		streams[i].vc = gb_streams[i].vc;
+		streams[i].dt[0] = gb_streams[i].dt[0];
+		streams[i].dt[1] = gb_streams[i].dt[1];
+		streams[i].max_size = gb_streams[i].max_size;
+		streams[i].pixel_code =
+			gb_camera_gb_to_mbus(gb_streams[i].format);
+	}
+	*nstreams = gb_nstreams;
+
+done:
+	kfree(gb_streams);
+	return ret;
+}
+
+static int gb_camera_op_capture(void *priv, u32 request_id,
+		unsigned int streams, unsigned int num_frames,
+		size_t settings_size, const void *settings)
+{
+	return gb_camera_capture(priv, request_id, streams, num_frames,
+				 settings_size, settings);
+}
+
+static int gb_camera_op_flush(void *priv, u32 *request_id)
+{
+	return gb_camera_flush(priv, request_id);
+}
+
+struct gb_camera_ops gb_cam_ops = {
+	.configure_streams = gb_camera_op_configure_streams,
+	.capture = gb_camera_op_capture,
+	.flush = gb_camera_op_flush,
+};
+
+static int gb_camera_register_intf_ops(struct gb_camera *gcam)
+{
+	return gb_camera_register(&gb_cam_ops, gcam);
+}
+
+/* -----------------------------------------------------------------------------
  * DebugFS
  */
 static ssize_t gb_camera_debugfs_capabilities(struct gb_camera *gcam,
@@ -330,12 +570,11 @@ static ssize_t gb_camera_debugfs_configure_streams(struct gb_camera *gcam,
 			goto done;
 	}
 
-	ret = gb_camera_configure_streams(gcam, nstreams, flags, streams);
+	ret = gb_camera_configure_streams(gcam, &nstreams, &flags, streams);
 	if (ret < 0)
 		goto done;
 
-	nstreams = ret;
-	buffer->length = sprintf(buffer->data, "%u;", nstreams);
+	buffer->length = sprintf(buffer->data, "%u;%u;", nstreams, flags);
 
 	for (i = 0; i < nstreams; ++i) {
 		struct gb_camera_stream_config *stream = &streams[i];
@@ -616,25 +855,11 @@ static int gb_camera_connection_init(struct gb_connection *connection)
 
 	gcam->data_connected = true;
 
-	ret = gb_svc_intf_set_power_mode(svc, connection->intf->interface_id,
-					 GB_SVC_UNIPRO_HS_SERIES_A,
-					 GB_SVC_UNIPRO_FAST_MODE, 2, 2,
-					 GB_SVC_UNIPRO_FAST_MODE, 2, 2,
-					 GB_SVC_PWRM_RXTERMINATION |
-					 GB_SVC_PWRM_TXTERMINATION, 0);
-	if (ret < 0)
-		goto error;
-
-	ret = gb_svc_intf_set_power_mode(svc, svc->ap_intf_id,
-					 GB_SVC_UNIPRO_HS_SERIES_A,
-					 GB_SVC_UNIPRO_FAST_MODE, 2, 2,
-					 GB_SVC_UNIPRO_FAST_MODE, 2, 2,
-					 GB_SVC_PWRM_RXTERMINATION |
-					 GB_SVC_PWRM_TXTERMINATION, 0);
-	if (ret < 0)
-		goto error;
-
 	ret = gb_camera_debugfs_init(gcam);
+	if (ret < 0)
+		goto error;
+
+	ret = gb_camera_register_intf_ops(gcam);
 	if (ret < 0)
 		goto error;
 

@@ -16,10 +16,13 @@
 enum gb_connection_state {
 	GB_CONNECTION_STATE_INVALID	= 0,
 	GB_CONNECTION_STATE_DISABLED	= 1,
-	GB_CONNECTION_STATE_ENABLED	= 2,
-	GB_CONNECTION_STATE_ERROR	= 3,
-	GB_CONNECTION_STATE_DESTROYING	= 4,
+	GB_CONNECTION_STATE_ENABLED_TX	= 2,
+	GB_CONNECTION_STATE_ENABLED	= 3,
 };
+
+struct gb_operation;
+
+typedef int (*gb_request_handler_t)(struct gb_operation *);
 
 struct gb_connection {
 	struct gb_host_device		*hd;
@@ -32,13 +35,13 @@ struct gb_connection {
 	struct list_head		hd_links;
 	struct list_head		bundle_links;
 
+	gb_request_handler_t		handler;
+
 	struct gb_protocol		*protocol;
-	u8				protocol_id;
-	u8				major;
-	u8				minor;
 	u8				module_major;
 	u8				module_minor;
 
+	struct mutex			mutex;
 	spinlock_t			lock;
 	enum gb_connection_state	state;
 	struct list_head		operations;
@@ -52,10 +55,10 @@ struct gb_connection {
 };
 
 struct gb_connection *gb_connection_create_static(struct gb_host_device *hd,
-				u16 hd_cport_id, u8 protocol_id);
-struct gb_connection *gb_connection_create_dynamic(struct gb_interface *intf,
-				struct gb_bundle *bundle, u16 cport_id,
-				u8 protocol_id);
+				u16 hd_cport_id, gb_request_handler_t handler);
+struct gb_connection *gb_connection_create_control(struct gb_interface *intf);
+struct gb_connection *gb_connection_create(struct gb_bundle *bundle,
+				u16 cport_id, gb_request_handler_t handler);
 void gb_connection_destroy(struct gb_connection *connection);
 
 static inline bool gb_connection_is_static(struct gb_connection *connection)
@@ -63,8 +66,10 @@ static inline bool gb_connection_is_static(struct gb_connection *connection)
 	return !connection->intf;
 }
 
-int gb_connection_init(struct gb_connection *connection);
-void gb_connection_exit(struct gb_connection *connection);
+int gb_connection_enable(struct gb_connection *connection);
+int gb_connection_enable_tx(struct gb_connection *connection);
+void gb_connection_disable_rx(struct gb_connection *connection);
+void gb_connection_disable(struct gb_connection *connection);
 
 void greybus_data_rcvd(struct gb_host_device *hd, u16 cport_id,
 			u8 *data, size_t length);
