@@ -107,12 +107,63 @@ static const struct gb_camera_fmt_map mbus_to_gbus_format[] = {
  * Camera Protocol Operations
  */
 
+static int gb_camera_set_intf_power_mode(struct gb_camera *gcam, u8 intf_id,
+					 bool hs)
+{
+	struct gb_svc *svc = gcam->connection->hd->svc;
+	int ret;
+
+	if (hs)
+		ret = gb_svc_intf_set_power_mode(svc, intf_id,
+						 GB_SVC_UNIPRO_HS_SERIES_A,
+						 GB_SVC_UNIPRO_FAST_MODE, 2, 2,
+						 GB_SVC_UNIPRO_FAST_MODE, 2, 2,
+						 GB_SVC_PWRM_RXTERMINATION |
+						 GB_SVC_PWRM_TXTERMINATION, 0);
+	else
+		ret = gb_svc_intf_set_power_mode(svc, intf_id,
+						 GB_SVC_UNIPRO_HS_SERIES_A,
+						 GB_SVC_UNIPRO_SLOW_AUTO_MODE,
+						 1, 2,
+						 GB_SVC_UNIPRO_SLOW_AUTO_MODE,
+						 1, 2,
+						 0, 0);
+
+	return ret;
+}
+
+static int gb_camera_set_power_mode(struct gb_camera *gcam, bool hs)
+{
+	struct gb_interface *intf = gcam->connection->intf;
+	struct gb_svc *svc = gcam->connection->hd->svc;
+	int ret;
+
+	ret = gb_camera_set_intf_power_mode(gcam, intf->interface_id, hs);
+	if (ret < 0) {
+		gcam_err(gcam, "failed to set module interface to %s (%d)\n",
+			 hs ? "HS" : "PWM", ret);
+		return ret;
+	}
+
+	ret = gb_camera_set_intf_power_mode(gcam, svc->ap_intf_id, hs);
+	if (ret < 0) {
+		gb_camera_set_intf_power_mode(gcam, intf->interface_id, !hs);
+		gcam_err(gcam, "failed to set AP interface to %s (%d)\n",
+			 hs ? "HS" : "PWM", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
 struct ap_csi_config_request {
 	__u8 csi_id;
-	__u8 clock_mode;
+	__u8 flags;
+#define GB_CAMERA_CSI_FLAG_CLOCK_CONTINUOUS 0x01
 	__u8 num_lanes;
 	__u8 padding;
 	__le32 bus_freq;
+	__le32 lines_per_second;
 } __packed;
 
 static int gb_camera_configure_streams(struct gb_camera *gcam,
@@ -120,8 +171,6 @@ static int gb_camera_configure_streams(struct gb_camera *gcam,
 				       unsigned int *flags,
 				       struct gb_camera_stream_config *streams)
 {
-	struct gb_interface *intf = gcam->connection->intf;
-	struct gb_svc *svc = gcam->connection->hd->svc;
 	struct gb_camera_configure_streams_request *req;
 	struct gb_camera_configure_streams_response *resp;
 	struct ap_csi_config_request csi_cfg;
@@ -145,57 +194,6 @@ static int gb_camera_configure_streams(struct gb_camera *gcam,
 		goto done;
 	}
 
-	/*
-	 * Setup unipro link speed before actually issuing configuration
-	 * to the camera module, to assure unipro network speed is set
-	 * before CSI interfaces gets configured
-	 */
-	if (nstreams && !(*flags & GB_CAMERA_CONFIGURE_STREAMS_TEST_ONLY)) {
-		ret = gb_svc_intf_set_power_mode(svc, intf->interface_id,
-						 GB_SVC_UNIPRO_HS_SERIES_A,
-						 GB_SVC_UNIPRO_FAST_MODE, 2, 2,
-						 GB_SVC_UNIPRO_FAST_MODE, 2, 2,
-						 GB_SVC_PWRM_RXTERMINATION |
-						 GB_SVC_PWRM_TXTERMINATION, 0);
-		if (ret < 0)
-			goto done;
-
-		ret = gb_svc_intf_set_power_mode(svc, svc->ap_intf_id,
-						 GB_SVC_UNIPRO_HS_SERIES_A,
-						 GB_SVC_UNIPRO_FAST_MODE, 2, 2,
-						 GB_SVC_UNIPRO_FAST_MODE, 2, 2,
-						 GB_SVC_PWRM_RXTERMINATION |
-						 GB_SVC_PWRM_TXTERMINATION, 0);
-		if (ret < 0)
-			goto done;
-	} else if (nstreams == 0) {
-		ret = gb_svc_intf_set_power_mode(svc, intf->interface_id,
-						 GB_SVC_UNIPRO_HS_SERIES_A,
-						 GB_SVC_UNIPRO_SLOW_AUTO_MODE,
-						 1, 2,
-						 GB_SVC_UNIPRO_SLOW_AUTO_MODE,
-						 1, 2,
-						 0, 0);
-		if (ret < 0) {
-			gcam_err(gcam, "can't take camera link to PWM-G1 auto: %d\n",
-				 ret);
-			goto done;
-		}
-
-		ret = gb_svc_intf_set_power_mode(svc, svc->ap_intf_id,
-						 GB_SVC_UNIPRO_HS_SERIES_A,
-						 GB_SVC_UNIPRO_SLOW_AUTO_MODE,
-						 1, 2,
-						 GB_SVC_UNIPRO_SLOW_AUTO_MODE,
-						 1, 2,
-						 0, 0);
-		if (ret < 0) {
-			gcam_err(gcam, "can't take AP link to PWM-G1 auto: %d\n",
-				 ret);
-			goto done;
-		}
-	}
-
 	req->num_streams = nstreams;
 	req->flags = *flags;
 	req->padding = 0;
@@ -213,19 +211,19 @@ static int gb_camera_configure_streams(struct gb_camera *gcam,
 				GB_CAMERA_TYPE_CONFIGURE_STREAMS,
 				req, req_size, resp, resp_size);
 	if (ret < 0)
-		goto set_unipro_slow_mode;
+		goto done;
 
 	if (resp->num_streams > nstreams) {
 		gcam_dbg(gcam, "got #streams %u > request %u\n",
 			 resp->num_streams, nstreams);
 		ret = -EIO;
-		goto set_unipro_slow_mode;
+		goto done;
 	}
 
 	if (resp->padding != 0) {
 		gcam_dbg(gcam, "response padding != 0");
 		ret = -EIO;
-		goto set_unipro_slow_mode;
+		goto done;
 	}
 
 	for (i = 0; i < nstreams; ++i) {
@@ -242,24 +240,38 @@ static int gb_camera_configure_streams(struct gb_camera *gcam,
 		if (cfg->padding[0] || cfg->padding[1] || cfg->padding[2]) {
 			gcam_dbg(gcam, "stream #%u padding != 0", i);
 			ret = -EIO;
-			goto set_unipro_slow_mode;
+			goto done;
 		}
 	}
 
-	if (nstreams && resp->flags & GB_CAMERA_CONFIGURE_STREAMS_ADJUSTED) {
+	if ((resp->flags & GB_CAMERA_CONFIGURE_STREAMS_ADJUSTED) ||
+	    (*flags & GB_CAMERA_CONFIGURE_STREAMS_TEST_ONLY)) {
 		*flags = resp->flags;
 		*num_streams = resp->num_streams;
-		goto set_unipro_slow_mode;
+		goto done;
 	}
 
+	/* Setup unipro link speed. */
+	ret = gb_camera_set_power_mode(gcam, nstreams != 0);
+	if (ret < 0)
+		goto done;
+
+	/*
+	 * Configure the APB1 CSI transmitter using the lines count reported by
+	 * the  camera module, but with hard-coded bus frequency and lanes number.
+	 *
+	 * TODO: use the clocking and size informations reported by camera module
+	 * to compute the required CSI bandwidth, and configure the CSI receiver
+	 * on AP side, and the CSI transmitter on APB1 side accordingly.
+	 */
 	memset(&csi_cfg, 0, sizeof(csi_cfg));
 
-	/* Configure the CSI transmitter. Hardcode the parameters for now. */
 	if (nstreams) {
 		csi_cfg.csi_id = 1;
-		csi_cfg.clock_mode = 0;
+		csi_cfg.flags = 0;
 		csi_cfg.num_lanes = 4;
 		csi_cfg.bus_freq = cpu_to_le32(960000000);
+		csi_cfg.lines_per_second = resp->lines_per_second;
 		ret = gb_hd_output(gcam->connection->hd, &csi_cfg,
 				   sizeof(csi_cfg),
 				   GB_APB_REQUEST_CSI_TX_CONTROL, false);
@@ -277,35 +289,6 @@ static int gb_camera_configure_streams(struct gb_camera *gcam,
 	*flags = resp->flags;
 	*num_streams = resp->num_streams;
 	ret = 0;
-
-	kfree(req);
-	kfree(resp);
-	return ret;
-
-set_unipro_slow_mode:
-	ret = gb_svc_intf_set_power_mode(svc, intf->interface_id,
-					 GB_SVC_UNIPRO_HS_SERIES_A,
-					 GB_SVC_UNIPRO_SLOW_AUTO_MODE,
-					 1, 2,
-					 GB_SVC_UNIPRO_SLOW_AUTO_MODE,
-					 1, 2,
-					 0, 0);
-	if (ret < 0) {
-		gcam_err(gcam, "can't take camera link to PWM-G1 auto: %d\n",
-			 ret);
-		goto done;
-	}
-
-	ret = gb_svc_intf_set_power_mode(svc, svc->ap_intf_id,
-				   GB_SVC_UNIPRO_HS_SERIES_A,
-				   GB_SVC_UNIPRO_SLOW_AUTO_MODE,
-				   1, 2,
-				   GB_SVC_UNIPRO_SLOW_AUTO_MODE,
-				   1, 2,
-				   0, 0);
-	if (ret < 0)
-		gcam_err(gcam, "can't take AP link to PWM-G1 auto: %d\n",
-			 ret);
 
 done:
 	kfree(req);

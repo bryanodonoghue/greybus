@@ -574,6 +574,41 @@ static int latency_tag_disable(struct gb_host_device *hd, u16 cport_id)
 	return retval;
 }
 
+static int fct_flow_enable(struct gb_host_device *hd, u16 cport_id)
+{
+	int retval;
+	struct es2_ap_dev *es2 = hd_to_es2(hd);
+	struct usb_device *udev = es2->usb_dev;
+
+	retval = usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
+				 GB_APB_REQUEST_FCT_FLOW_EN,
+				 USB_DIR_OUT | USB_TYPE_VENDOR |
+				 USB_RECIP_INTERFACE, cport_id, 0, NULL,
+				 0, ES2_TIMEOUT);
+	if (retval < 0)
+		dev_err(&udev->dev, "Cannot enable FCT flow for cport %u: %d\n",
+			cport_id, retval);
+	return retval;
+}
+
+static int fct_flow_disable(struct gb_host_device *hd, u16 cport_id)
+{
+	int retval;
+	struct es2_ap_dev *es2 = hd_to_es2(hd);
+	struct usb_device *udev = es2->usb_dev;
+
+	retval = usb_control_msg(udev, usb_sndctrlpipe(udev, 0),
+				 GB_APB_REQUEST_FCT_FLOW_DIS,
+				 USB_DIR_OUT | USB_TYPE_VENDOR |
+				 USB_RECIP_INTERFACE, cport_id, 0, NULL,
+				 0, ES2_TIMEOUT);
+	if (retval < 0)
+		dev_err(&udev->dev,
+			"Cannot disable FCT flow for cport %u: %d\n",
+			cport_id, retval);
+	return retval;
+}
+
 static struct gb_hd_driver es2_driver = {
 	.hd_priv_size		= sizeof(struct es2_ap_dev),
 	.message_send		= message_send,
@@ -582,6 +617,8 @@ static struct gb_hd_driver es2_driver = {
 	.latency_tag_enable	= latency_tag_enable,
 	.latency_tag_disable	= latency_tag_disable,
 	.output			= output,
+	.fct_flow_enable	= fct_flow_enable,
+	.fct_flow_disable	= fct_flow_disable,
 };
 
 /* Common function to report consistent warnings based on URB status */
@@ -861,7 +898,7 @@ static int apb_get_cport_count(struct usb_device *udev)
 	int retval;
 	__le16 *cport_count;
 
-	cport_count = kmalloc(sizeof(*cport_count), GFP_KERNEL);
+	cport_count = kzalloc(sizeof(*cport_count), GFP_KERNEL);
 	if (!cport_count)
 		return -ENOMEM;
 
@@ -870,9 +907,13 @@ static int apb_get_cport_count(struct usb_device *udev)
 				 USB_DIR_IN | USB_TYPE_VENDOR |
 				 USB_RECIP_INTERFACE, 0, 0, cport_count,
 				 sizeof(*cport_count), ES2_TIMEOUT);
-	if (retval < 0) {
+	if (retval != sizeof(*cport_count)) {
 		dev_err(&udev->dev, "Cannot retrieve CPort count: %d\n",
 			retval);
+
+		if (retval >= 0)
+			retval = -EIO;
+
 		goto out;
 	}
 

@@ -6,6 +6,9 @@
  *
  * Released under the GPLv2 only.
  */
+
+#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -78,6 +81,7 @@ struct gb_loopback {
 	atomic_t outstanding_operations;
 
 	/* Per connection stats */
+	struct timeval ts;
 	struct gb_loopback_stats latency;
 	struct gb_loopback_stats throughput;
 	struct gb_loopback_stats requests_per_second;
@@ -153,14 +157,15 @@ static ssize_t name##_avg_show(struct device *dev,		\
 {									\
 	struct gb_loopback_stats *stats;				\
 	struct gb_loopback *gb;						\
-	u64 avg;							\
-	u32 count, rem;							\
+	u64 avg, rem;							\
+	u32 count;							\
 	gb = dev_get_drvdata(dev);			\
 	stats = &gb->name;					\
 	count = stats->count ? stats->count : 1;			\
-	avg = stats->sum + count / 2;	/* round closest */		\
+	avg = stats->sum;						\
 	rem = do_div(avg, count);					\
-	return sprintf(buf, "%llu.%06u\n", avg, 1000000 * rem / count);	\
+	rem = 1000000 * rem / count;					\
+	return sprintf(buf, "%llu.%06u\n", avg, (u32)rem);		\
 }									\
 static DEVICE_ATTR_RO(name##_avg)
 
@@ -348,7 +353,7 @@ static struct attribute *loopback_attrs[] = {
 };
 ATTRIBUTE_GROUPS(loopback);
 
-static void gb_loopback_calculate_stats(struct gb_loopback *gb);
+static void gb_loopback_calculate_stats(struct gb_loopback *gb, bool error);
 
 static u32 gb_loopback_nsec_to_usec_latency(u64 elapsed_nsecs)
 {
@@ -395,10 +400,8 @@ static int gb_loopback_operation_sync(struct gb_loopback *gb, int type,
 	do_gettimeofday(&ts);
 	operation = gb_operation_create(gb->connection, type, request_size,
 					response_size, GFP_KERNEL);
-	if (!operation) {
-		ret = -ENOMEM;
-		goto error;
-	}
+	if (!operation)
+		return -ENOMEM;
 
 	if (request_size)
 		memcpy(operation->request->payload, request, request_size);
@@ -407,6 +410,7 @@ static int gb_loopback_operation_sync(struct gb_loopback *gb, int type,
 	if (ret) {
 		dev_err(&gb->connection->bundle->dev,
 			"synchronous operation failed: %d\n", ret);
+		goto out_put_operation;
 	} else {
 		if (response_size == operation->response->payload_size) {
 			memcpy(response, operation->response->payload,
@@ -416,17 +420,19 @@ static int gb_loopback_operation_sync(struct gb_loopback *gb, int type,
 				"response size %zu expected %d\n",
 				operation->response->payload_size,
 				response_size);
+			ret = -EINVAL;
+			goto out_put_operation;
 		}
 	}
 
-	gb_operation_put(operation);
-
-error:
 	do_gettimeofday(&te);
 
 	/* Calculate the total time the message took */
 	gb_loopback_push_latency_ts(gb, &ts, &te);
 	gb->elapsed_nsecs = gb_loopback_calc_latency(&ts, &te);
+
+out_put_operation:
+	gb_operation_put(operation);
 
 	return ret;
 }
@@ -513,11 +519,9 @@ static void gb_loopback_async_operation_callback(struct gb_operation *operation)
 	if (err) {
 		gb->error++;
 	} else {
-		gb->requests_completed++;
 		gb_loopback_push_latency_ts(gb, &op_async->ts, &te);
 		gb->elapsed_nsecs = gb_loopback_calc_latency(&op_async->ts,
 							     &te);
-		gb_loopback_calculate_stats(gb);
 	}
 
 	if (op_async->pending) {
@@ -525,6 +529,7 @@ static void gb_loopback_async_operation_callback(struct gb_operation *operation)
 		op_async->pending = false;
 		del_timer_sync(&op_async->timer);
 		gb_loopback_async_operation_put(op_async);
+		gb_loopback_calculate_stats(gb, err);
 	}
 	mutex_unlock(&gb->mutex);
 
@@ -551,6 +556,7 @@ static void gb_loopback_async_operation_work(struct work_struct *work)
 		gb->iteration_count++;
 		op_async->pending = false;
 		gb_loopback_async_operation_put(op_async);
+		gb_loopback_calculate_stats(gb, true);
 	}
 	mutex_unlock(&gb->mutex);
 
@@ -774,7 +780,7 @@ static int gb_loopback_async_ping(struct gb_loopback *gb)
 					   NULL, 0, 0, NULL);
 }
 
-static int gb_loopback_request_recv(u8 type, struct gb_operation *operation)
+static int gb_loopback_request_handler(struct gb_operation *operation)
 {
 	struct gb_connection *connection = operation->connection;
 	struct gb_loopback_transfer_request *request;
@@ -783,7 +789,7 @@ static int gb_loopback_request_recv(u8 type, struct gb_operation *operation)
 	size_t len;
 
 	/* By convention, the AP initiates the version operation */
-	switch (type) {
+	switch (operation->type) {
 	case GB_REQUEST_TYPE_PROTOCOL_VERSION:
 		dev_err(dev, "module-initiated version operation\n");
 		return -EINVAL;
@@ -817,7 +823,7 @@ static int gb_loopback_request_recv(u8 type, struct gb_operation *operation)
 
 		return 0;
 	default:
-		dev_err(dev, "unsupported request: %u\n", type);
+		dev_err(dev, "unsupported request: %u\n", operation->type);
 		return -EINVAL;
 	}
 }
@@ -843,6 +849,7 @@ static void gb_loopback_reset_stats(struct gb_loopback *gb)
 	/* Should be initialized at least once per transaction set */
 	gb->apbridge_latency_ts = 0;
 	gb->gpbridge_latency_ts = 0;
+	memset(&gb->ts, 0, sizeof(struct timeval));
 }
 
 static void gb_loopback_update_stats(struct gb_loopback_stats *stats, u32 val)
@@ -855,18 +862,29 @@ static void gb_loopback_update_stats(struct gb_loopback_stats *stats, u32 val)
 	stats->count++;
 }
 
+static void gb_loopback_update_stats_window(struct gb_loopback_stats *stats,
+					    u64 val, u32 count)
+{
+	stats->sum += val;
+	stats->count += count;
+
+	do_div(val, count);
+	if (stats->min > val)
+		stats->min = val;
+	if (stats->max < val)
+		stats->max = val;
+}
+
 static void gb_loopback_requests_update(struct gb_loopback *gb, u32 latency)
 {
-	u32 req = USEC_PER_SEC;
+	u64 req = gb->requests_completed * USEC_PER_SEC;
 
-	do_div(req, latency);
-	gb_loopback_update_stats(&gb->requests_per_second, req);
+	gb_loopback_update_stats_window(&gb->requests_per_second, req, latency);
 }
 
 static void gb_loopback_throughput_update(struct gb_loopback *gb, u32 latency)
 {
-	u32 throughput;
-	u32 aggregate_size = sizeof(struct gb_operation_msg_hdr) * 2;
+	u64 aggregate_size = sizeof(struct gb_operation_msg_hdr) * 2;
 
 	switch (gb->type) {
 	case GB_LOOPBACK_TYPE_PING:
@@ -884,14 +902,13 @@ static void gb_loopback_throughput_update(struct gb_loopback *gb, u32 latency)
 		return;
 	}
 
-	/* Calculate bytes per second */
-	throughput = USEC_PER_SEC;
-	do_div(throughput, latency);
-	throughput *= aggregate_size;
-	gb_loopback_update_stats(&gb->throughput, throughput);
+	aggregate_size *= gb->requests_completed;
+	aggregate_size *= USEC_PER_SEC;
+	gb_loopback_update_stats_window(&gb->throughput, aggregate_size,
+					latency);
 }
 
-static void gb_loopback_calculate_stats(struct gb_loopback *gb)
+static void gb_loopback_calculate_latency_stats(struct gb_loopback *gb)
 {
 	u32 lat;
 
@@ -904,15 +921,37 @@ static void gb_loopback_calculate_stats(struct gb_loopback *gb)
 	/* Raw latency log on a per thread basis */
 	kfifo_in(&gb->kfifo_lat, (unsigned char *)&lat, sizeof(lat));
 
-	/* Log throughput and requests using latency as benchmark */
-	gb_loopback_throughput_update(gb, lat);
-	gb_loopback_requests_update(gb, lat);
-
 	/* Log the firmware supplied latency values */
 	gb_loopback_update_stats(&gb->apbridge_unipro_latency,
 				 gb->apbridge_latency_ts);
 	gb_loopback_update_stats(&gb->gpbridge_firmware_latency,
 				 gb->gpbridge_latency_ts);
+}
+
+static void gb_loopback_calculate_stats(struct gb_loopback *gb, bool error)
+{
+	u64 nlat;
+	u32 lat;
+	struct timeval te;
+
+	if (!error) {
+		gb->requests_completed++;
+		gb_loopback_calculate_latency_stats(gb);
+	}
+
+	do_gettimeofday(&te);
+	nlat = gb_loopback_calc_latency(&gb->ts, &te);
+	if (nlat >= NSEC_PER_SEC || gb->iteration_count == gb->iteration_max) {
+		lat = gb_loopback_nsec_to_usec_latency(nlat);
+
+		gb_loopback_throughput_update(gb, lat);
+		gb_loopback_requests_update(gb, lat);
+
+		if (gb->iteration_count != gb->iteration_max) {
+			gb->ts = te;
+			gb->requests_completed = 0;
+		}
+	}
 }
 
 static void gb_loopback_async_wait_to_send(struct gb_loopback *gb)
@@ -952,21 +991,24 @@ static int gb_loopback_fn(void *data)
 
 		/* Optionally terminate */
 		if (send_count == gb->iteration_max) {
-			gb->type = 0;
-			send_count = 0;
+			if (gb->iteration_count == gb->iteration_max) {
+				gb->type = 0;
+				send_count = 0;
+			}
 			mutex_unlock(&gb->mutex);
 			continue;
 		}
 		size = gb->size;
 		us_wait = gb->us_wait;
 		type = gb->type;
+		if (gb->ts.tv_usec == 0 && gb->ts.tv_sec == 0)
+			do_gettimeofday(&gb->ts);
 		mutex_unlock(&gb->mutex);
 
 		/* Else operations to perform */
 		if (gb->async) {
 			if (type == GB_LOOPBACK_TYPE_PING) {
 				error = gb_loopback_async_ping(gb);
-				gb_loopback_calculate_stats(gb);
 			} else if (type == GB_LOOPBACK_TYPE_TRANSFER) {
 				error = gb_loopback_async_transfer(gb, size);
 			} else if (type == GB_LOOPBACK_TYPE_SINK) {
@@ -987,7 +1029,7 @@ static int gb_loopback_fn(void *data)
 			if (error)
 				gb->error++;
 			gb->iteration_count++;
-			gb_loopback_calculate_stats(gb);
+			gb_loopback_calculate_stats(gb, !!error);
 		}
 		send_count++;
 		if (us_wait)
@@ -1080,17 +1122,37 @@ static void gb_loopback_insert_id(struct gb_loopback *gb)
 
 #define DEBUGFS_NAMELEN 32
 
-static int gb_loopback_connection_init(struct gb_connection *connection)
+static int gb_loopback_probe(struct gb_bundle *bundle,
+			     const struct greybus_bundle_id *id)
 {
+	struct greybus_descriptor_cport *cport_desc;
+	struct gb_connection *connection;
 	struct gb_loopback *gb;
 	struct device *dev;
 	int retval;
 	char name[DEBUGFS_NAMELEN];
 	unsigned long flags;
 
+	if (bundle->num_cports != 1)
+		return -ENODEV;
+
+	cport_desc = &bundle->cport_desc[0];
+	if (cport_desc->protocol_id != GREYBUS_PROTOCOL_LOOPBACK)
+		return -ENODEV;
+
 	gb = kzalloc(sizeof(*gb), GFP_KERNEL);
 	if (!gb)
 		return -ENOMEM;
+
+	connection = gb_connection_create(bundle, le16_to_cpu(cport_desc->id),
+					  gb_loopback_request_handler);
+	if (IS_ERR(connection)) {
+		retval = PTR_ERR(connection);
+		goto out_kzalloc;
+	}
+
+	gb->connection = connection;
+	greybus_set_drvdata(bundle, gb);
 
 	init_waitqueue_head(&gb->wq);
 	init_waitqueue_head(&gb->wq_completion);
@@ -1107,7 +1169,7 @@ static int gb_loopback_connection_init(struct gb_connection *connection)
 		if (gb_dev.size_max <=
 			sizeof(struct gb_loopback_transfer_request)) {
 			retval = -EINVAL;
-			goto out_kzalloc;
+			goto out_connection_destroy;
 		}
 		gb_dev.size_max -= sizeof(struct gb_loopback_transfer_request);
 	}
@@ -1117,14 +1179,16 @@ static int gb_loopback_connection_init(struct gb_connection *connection)
 		 dev_name(&connection->bundle->dev));
 	gb->file = debugfs_create_file(name, S_IFREG | S_IRUGO, gb_dev.root, gb,
 				       &gb_loopback_debugfs_latency_ops);
-	gb->connection = connection;
-	connection->bundle->private = gb;
 
 	gb->id = ida_simple_get(&loopback_ida, 0, 0, GFP_KERNEL);
 	if (gb->id < 0) {
 		retval = gb->id;
-		goto out_ida;
+		goto out_debugfs_remove;
 	}
+
+	retval = gb_connection_enable(connection);
+	if (retval)
+		goto out_ida_remove;
 
 	dev = device_create_with_groups(&loopback_class,
 					&connection->bundle->dev,
@@ -1132,7 +1196,7 @@ static int gb_loopback_connection_init(struct gb_connection *connection)
 					"gb_loopback%d", gb->id);
 	if (IS_ERR(dev)) {
 		retval = PTR_ERR(dev);
-		goto out_dev;
+		goto out_connection_disable;
 	}
 	gb->dev = dev;
 
@@ -1170,30 +1234,40 @@ out_kfifo0:
 	kfifo_free(&gb->kfifo_lat);
 out_conn:
 	device_unregister(dev);
-out_dev:
+out_connection_disable:
+	gb_connection_disable(connection);
+out_ida_remove:
 	ida_simple_remove(&loopback_ida, gb->id);
-out_ida:
+out_debugfs_remove:
 	debugfs_remove(gb->file);
-	connection->bundle->private = NULL;
+out_connection_destroy:
+	gb_connection_destroy(connection);
 out_kzalloc:
 	kfree(gb);
 
 	return retval;
 }
 
-static void gb_loopback_connection_exit(struct gb_connection *connection)
+static void gb_loopback_disconnect(struct gb_bundle *bundle)
 {
-	struct gb_loopback *gb = connection->bundle->private;
+	struct gb_loopback *gb = greybus_get_drvdata(bundle);
 	unsigned long flags;
+
+	gb_connection_disable(gb->connection);
 
 	if (!IS_ERR_OR_NULL(gb->task))
 		kthread_stop(gb->task);
 
-	connection->bundle->private = NULL;
 	kfifo_free(&gb->kfifo_lat);
 	kfifo_free(&gb->kfifo_ts);
-	gb_connection_latency_tag_disable(connection);
+	gb_connection_latency_tag_disable(gb->connection);
 	debugfs_remove(gb->file);
+
+	/*
+	 * FIXME: gb_loopback_async_wait_all() is redundant now, as connection
+	 * is disabled at the beginning and so we can't have any more
+	 * incoming/outgoing requests.
+	 */
 	gb_loopback_async_wait_all(gb);
 
 	spin_lock_irqsave(&gb_dev.lock, flags);
@@ -1204,17 +1278,21 @@ static void gb_loopback_connection_exit(struct gb_connection *connection)
 	device_unregister(gb->dev);
 	ida_simple_remove(&loopback_ida, gb->id);
 
+	gb_connection_destroy(gb->connection);
 	kfree(gb);
 }
 
-static struct gb_protocol loopback_protocol = {
-	.name			= "loopback",
-	.id			= GREYBUS_PROTOCOL_LOOPBACK,
-	.major			= GB_LOOPBACK_VERSION_MAJOR,
-	.minor			= GB_LOOPBACK_VERSION_MINOR,
-	.connection_init	= gb_loopback_connection_init,
-	.connection_exit	= gb_loopback_connection_exit,
-	.request_recv		= gb_loopback_request_recv,
+static const struct greybus_bundle_id gb_loopback_id_table[] = {
+	{ GREYBUS_DEVICE_CLASS(GREYBUS_CLASS_LOOPBACK) },
+	{ }
+};
+MODULE_DEVICE_TABLE(greybus, gb_loopback_id_table);
+
+static struct greybus_driver gb_loopback_driver = {
+	.name		= "loopback",
+	.probe		= gb_loopback_probe,
+	.disconnect	= gb_loopback_disconnect,
+	.id_table	= gb_loopback_id_table,
 };
 
 static int loopback_init(void)
@@ -1230,7 +1308,7 @@ static int loopback_init(void)
 	if (retval)
 		goto err;
 
-	retval = gb_protocol_register(&loopback_protocol);
+	retval = greybus_register(&gb_loopback_driver);
 	if (retval)
 		goto err_unregister;
 
@@ -1247,7 +1325,7 @@ module_init(loopback_init);
 static void __exit loopback_exit(void)
 {
 	debugfs_remove_recursive(gb_dev.root);
-	gb_protocol_deregister(&loopback_protocol);
+	greybus_deregister(&gb_loopback_driver);
 	class_unregister(&loopback_class);
 	ida_destroy(&loopback_ida);
 }

@@ -57,17 +57,17 @@ static DEFINE_IDA(minors);
 static int receive_data(struct gb_raw *raw, u32 len, u8 *data)
 {
 	struct raw_data *raw_data;
+	struct device *dev = &raw->connection->bundle->dev;
 	int retval = 0;
 
 	if (len > MAX_PACKET_SIZE) {
-		dev_err(raw->device, "Too big of a data packet, rejected\n");
+		dev_err(dev, "Too big of a data packet, rejected\n");
 		return -EINVAL;
 	}
 
 	mutex_lock(&raw->list_lock);
 	if ((raw->list_data + len) > MAX_DATA_SIZE) {
-		dev_err(raw->device,
-			"Too much data in receive buffer, now dropping packets\n");
+		dev_err(dev, "Too much data in receive buffer, now dropping packets\n");
 		retval = -EINVAL;
 		goto exit;
 	}
@@ -88,35 +88,34 @@ exit:
 	return retval;
 }
 
-static int gb_raw_receive(u8 type, struct gb_operation *op)
+static int gb_raw_request_handler(struct gb_operation *op)
 {
 	struct gb_connection *connection = op->connection;
-	struct gb_raw *raw = connection->private;
+	struct device *dev = &connection->bundle->dev;
+	struct gb_raw *raw = greybus_get_drvdata(connection->bundle);
 	struct gb_raw_send_request *receive;
 	u32 len;
 
-	if (type != GB_RAW_TYPE_SEND) {
-		dev_err(raw->device, "unknown request type %d\n", type);
+	if (op->type != GB_RAW_TYPE_SEND) {
+		dev_err(dev, "unknown request type %d\n", op->type);
 		return -EINVAL;
 	}
 
 	/* Verify size of payload */
 	if (op->request->payload_size < sizeof(*receive)) {
-		dev_err(raw->device, "raw receive request too small (%zu < %zu)\n",
+		dev_err(dev, "raw receive request too small (%zu < %zu)\n",
 			op->request->payload_size, sizeof(*receive));
 		return -EINVAL;
 	}
 	receive = op->request->payload;
 	len = le32_to_cpu(receive->len);
 	if (len != (int)(op->request->payload_size - sizeof(__le32))) {
-		dev_err(raw->device,
-			"raw receive request wrong size %d vs %d\n",
-			len,
+		dev_err(dev, "raw receive request wrong size %d vs %d\n", len,
 			(int)(op->request->payload_size - sizeof(__le32)));
 		return -EINVAL;
 	}
 	if (len == 0) {
-		dev_err(raw->device, "raw receive request of 0 bytes?\n");
+		dev_err(dev, "raw receive request of 0 bytes?\n");
 		return -EINVAL;
 	}
 
@@ -148,64 +147,96 @@ static int gb_raw_send(struct gb_raw *raw, u32 len, const char __user *data)
 	return retval;
 }
 
-static int gb_raw_connection_init(struct gb_connection *connection)
+static int gb_raw_probe(struct gb_bundle *bundle,
+			const struct greybus_bundle_id *id)
 {
+	struct greybus_descriptor_cport *cport_desc;
+	struct gb_connection *connection;
 	struct gb_raw *raw;
 	int retval;
 	int minor;
+
+	if (bundle->num_cports != 1)
+		return -ENODEV;
+
+	cport_desc = &bundle->cport_desc[0];
+	if (cport_desc->protocol_id != GREYBUS_PROTOCOL_RAW)
+		return -ENODEV;
 
 	raw = kzalloc(sizeof(*raw), GFP_KERNEL);
 	if (!raw)
 		return -ENOMEM;
 
-	raw->connection = connection;
-	connection->private = raw;
+	connection = gb_connection_create(bundle, le16_to_cpu(cport_desc->id),
+					  gb_raw_request_handler);
+	if (IS_ERR(connection)) {
+		retval = PTR_ERR(connection);
+		goto error_free;
+	}
 
 	INIT_LIST_HEAD(&raw->list);
 	mutex_init(&raw->list_lock);
 
+	raw->connection = connection;
+	greybus_set_drvdata(bundle, raw);
+
 	minor = ida_simple_get(&minors, 0, 0, GFP_KERNEL);
 	if (minor < 0) {
 		retval = minor;
-		goto error_free;
+		goto error_connection_destroy;
 	}
 
 	raw->dev = MKDEV(raw_major, minor);
 	cdev_init(&raw->cdev, &raw_fops);
+
+	retval = gb_connection_enable(connection);
+	if (retval)
+		goto error_remove_ida;
+
 	retval = cdev_add(&raw->cdev, raw->dev, 1);
 	if (retval)
-		goto error_cdev;
+		goto error_connection_disable;
 
 	raw->device = device_create(raw_class, &connection->bundle->dev,
 				    raw->dev, raw, "gb!raw%d", minor);
 	if (IS_ERR(raw->device)) {
 		retval = PTR_ERR(raw->device);
-		goto error_device;
+		goto error_del_cdev;
 	}
 
 	return 0;
 
-error_device:
+error_del_cdev:
 	cdev_del(&raw->cdev);
 
-error_cdev:
+error_connection_disable:
+	gb_connection_disable(connection);
+
+error_remove_ida:
 	ida_simple_remove(&minors, minor);
+
+error_connection_destroy:
+	gb_connection_destroy(connection);
 
 error_free:
 	kfree(raw);
 	return retval;
 }
 
-static void gb_raw_connection_exit(struct gb_connection *connection)
+static void gb_raw_disconnect(struct gb_bundle *bundle)
 {
-	struct gb_raw *raw = connection->private;
+	struct gb_raw *raw = greybus_get_drvdata(bundle);
+	struct gb_connection *connection = raw->connection;
 	struct raw_data *raw_data;
 	struct raw_data *temp;
 
 	// FIXME - handle removing a connection when the char device node is open.
+	device_destroy(raw_class, raw->dev);
 	cdev_del(&raw->cdev);
+	gb_connection_disable(connection);
 	ida_simple_remove(&minors, MINOR(raw->dev));
-	device_del(raw->device);
+	gb_connection_destroy(connection);
+
 	mutex_lock(&raw->list_lock);
 	list_for_each_entry_safe(raw_data, temp, &raw->list, entry) {
 		list_del(&raw_data->entry);
@@ -215,16 +246,6 @@ static void gb_raw_connection_exit(struct gb_connection *connection)
 
 	kfree(raw);
 }
-
-static struct gb_protocol raw_protocol = {
-	.name			= "raw",
-	.id			= GREYBUS_PROTOCOL_RAW,
-	.major			= GB_RAW_VERSION_MAJOR,
-	.minor			= GB_RAW_VERSION_MINOR,
-	.connection_init	= gb_raw_connection_init,
-	.connection_exit	= gb_raw_connection_exit,
-	.request_recv		= gb_raw_receive,
-};
 
 /*
  * Character device node interfaces.
@@ -303,6 +324,19 @@ static const struct file_operations raw_fops = {
 	.llseek		= noop_llseek,
 };
 
+static const struct greybus_bundle_id gb_raw_id_table[] = {
+	{ GREYBUS_DEVICE_CLASS(GREYBUS_CLASS_RAW) },
+	{ }
+};
+MODULE_DEVICE_TABLE(greybus, gb_raw_id_table);
+
+static struct greybus_driver gb_raw_driver = {
+	.name		= "raw",
+	.probe		= gb_raw_probe,
+	.disconnect	= gb_raw_disconnect,
+	.id_table	= gb_raw_id_table,
+};
+
 static int raw_init(void)
 {
 	dev_t dev;
@@ -318,10 +352,9 @@ static int raw_init(void)
 	if (retval < 0)
 		goto error_chrdev;
 
-
 	raw_major = MAJOR(dev);
 
-	retval = gb_protocol_register(&raw_protocol);
+	retval = greybus_register(&gb_raw_driver);
 	if (retval)
 		goto error_gb;
 
@@ -338,7 +371,7 @@ module_init(raw_init);
 
 static void __exit raw_exit(void)
 {
-	gb_protocol_deregister(&raw_protocol);
+	greybus_deregister(&gb_raw_driver);
 	unregister_chrdev_region(MKDEV(raw_major, 0), NUM_MINORS);
 	class_destroy(raw_class);
 	ida_destroy(&minors);

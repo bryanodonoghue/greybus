@@ -21,11 +21,6 @@
 #include <linux/spinlock.h>
 #include "arche_platform.h"
 
-enum apb_state {
-	APB_STATE_OFF,
-	APB_STATE_ACTIVE,
-	APB_STATE_STANDBY,
-};
 
 struct arche_apb_ctrl_drvdata {
 	/* Control GPIO signals to and from AP <=> AP Bridges */
@@ -36,7 +31,8 @@ struct arche_apb_ctrl_drvdata {
 	int wake_out_gpio;
 	int pwrdn_gpio;
 
-	enum apb_state state;
+	enum arche_platform_state state;
+	bool init_disabled;
 
 	struct regulator *vcore;
 	struct regulator *vio;
@@ -61,50 +57,21 @@ static inline void assert_reset(unsigned int gpio)
 	gpio_set_value(gpio, 0);
 }
 
-/* Export gpio's to user space */
-static void export_gpios(struct arche_apb_ctrl_drvdata *apb)
-{
-	gpio_export(apb->resetn_gpio, false);
-}
-
-static void unexport_gpios(struct arche_apb_ctrl_drvdata *apb)
-{
-	gpio_unexport(apb->resetn_gpio);
-}
-
 /*
  * Note: Please do not modify the below sequence, as it is as per the spec
  */
-static int apb_ctrl_init_seq(struct platform_device *pdev,
-		struct arche_apb_ctrl_drvdata *apb)
+static int coldboot_seq(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
+	struct arche_apb_ctrl_drvdata *apb = platform_get_drvdata(pdev);
 	int ret;
 
-	/* Hold APB in reset state */
-	ret = devm_gpio_request(dev, apb->resetn_gpio, "apb-reset");
-	if (ret) {
-		dev_err(dev, "Failed requesting reset gpio %d\n",
-				apb->resetn_gpio);
-		return ret;
-	}
-	ret = gpio_direction_output(apb->resetn_gpio, 0);
-	if (ret) {
-		dev_err(dev, "failed to set reset gpio dir:%d\n", ret);
-		return ret;
-	}
+	if (apb->init_disabled ||
+			apb->state == ARCHE_PLATFORM_STATE_ACTIVE)
+		return 0;
 
-	ret = devm_gpio_request(dev, apb->pwroff_gpio, "pwroff_n");
-	if (ret) {
-		dev_err(dev, "Failed requesting pwroff_n gpio %d\n",
-				apb->pwroff_gpio);
-		return ret;
-	}
-	ret = gpio_direction_input(apb->pwroff_gpio);
-	if (ret) {
-		dev_err(dev, "failed to set pwroff gpio dir:%d\n", ret);
-		return ret;
-	}
+	/* Hold APB in reset state */
+	assert_reset(apb->resetn_gpio);
 
 	/* Enable power to APB */
 	if (!IS_ERR(apb->vcore)) {
@@ -119,63 +86,221 @@ static int apb_ctrl_init_seq(struct platform_device *pdev,
 		ret = regulator_enable(apb->vio);
 		if (ret) {
 			dev_err(dev, "failed to enable IO regulator\n");
-			goto out_vcore_disable;
+			return ret;
 		}
 	}
 
-	ret = devm_gpio_request_one(dev, apb->boot_ret_gpio,
-			GPIOF_OUT_INIT_LOW, "boot retention");
-	if (ret) {
-		dev_err(dev, "Failed requesting bootret gpio %d\n",
-				apb->boot_ret_gpio);
-		goto out_vio_disable;
-	}
 	gpio_set_value(apb->boot_ret_gpio, 0);
 
 	/* On DB3 clock was not mandatory */
-	if (gpio_is_valid(apb->clk_en_gpio)) {
-		ret = devm_gpio_request(dev, apb->clk_en_gpio, "apb_clk_en");
-		if (ret) {
-			dev_warn(dev, "Failed requesting APB clock en gpio %d\n",
-				 apb->clk_en_gpio);
-		} else {
-			ret = gpio_direction_output(apb->clk_en_gpio, 1);
-			if (ret)
-				dev_warn(dev, "failed to set APB clock en gpio dir:%d\n",
-					 ret);
-		}
-	}
+	if (gpio_is_valid(apb->clk_en_gpio))
+		gpio_set_value(apb->clk_en_gpio, 1);
 
 	usleep_range(100, 200);
 
-	return 0;
+	/* deassert reset to APB : Active-low signal */
+	deassert_reset(apb->resetn_gpio);
 
-out_vio_disable:
-	if (!IS_ERR(apb->vio))
-		regulator_disable(apb->vio);
-out_vcore_disable:
-	if (!IS_ERR(apb->vcore))
+	apb->state = ARCHE_PLATFORM_STATE_ACTIVE;
+
+	return 0;
+}
+
+static int fw_flashing_seq(struct platform_device *pdev)
+{
+	struct device *dev = &pdev->dev;
+	struct arche_apb_ctrl_drvdata *apb = platform_get_drvdata(pdev);
+	int ret;
+
+	if (apb->init_disabled ||
+			apb->state == ARCHE_PLATFORM_STATE_FW_FLASHING)
+		return 0;
+
+	ret = regulator_enable(apb->vcore);
+	if (ret) {
+		dev_err(dev, "failed to enable core regulator\n");
+		return ret;
+	}
+
+	ret = regulator_enable(apb->vio);
+	if (ret) {
+		dev_err(dev, "failed to enable IO regulator\n");
+		return ret;
+	}
+
+	/* for flashing device should be in reset state */
+	assert_reset(apb->resetn_gpio);
+	apb->state = ARCHE_PLATFORM_STATE_FW_FLASHING;
+
+	return 0;
+}
+
+static int standby_boot_seq(struct platform_device *pdev)
+{
+	struct arche_apb_ctrl_drvdata *apb = platform_get_drvdata(pdev);
+
+	if (apb->init_disabled)
+		return 0;
+
+	/* Even if it is in OFF state, then we do not want to change the state */
+	if (apb->state == ARCHE_PLATFORM_STATE_STANDBY ||
+			apb->state == ARCHE_PLATFORM_STATE_OFF)
+		return 0;
+
+	/*
+	 * As per WDM spec, do nothing
+	 *
+	 * Pasted from WDM spec,
+	 *  - A falling edge on POWEROFF_L is detected (a)
+	 *  - WDM enters standby mode, but no output signals are changed
+	 * */
+
+	/* TODO: POWEROFF_L is input to WDM module  */
+	apb->state = ARCHE_PLATFORM_STATE_STANDBY;
+	return 0;
+}
+
+static void poweroff_seq(struct platform_device *pdev)
+{
+	struct arche_apb_ctrl_drvdata *apb = platform_get_drvdata(pdev);
+
+	if (apb->init_disabled || apb->state == ARCHE_PLATFORM_STATE_OFF)
+		return;
+
+	/* disable the clock */
+	if (gpio_is_valid(apb->clk_en_gpio))
+		gpio_set_value(apb->clk_en_gpio, 0);
+
+	if (!IS_ERR(apb->vcore) && regulator_is_enabled(apb->vcore) > 0)
 		regulator_disable(apb->vcore);
 
-	return ret;
+	if (!IS_ERR(apb->vio) && regulator_is_enabled(apb->vio) > 0)
+		regulator_disable(apb->vio);
+
+	/* As part of exit, put APB back in reset state */
+	assert_reset(apb->resetn_gpio);
+	apb->state = ARCHE_PLATFORM_STATE_OFF;
+
+	/* TODO: May have to send an event to SVC about this exit */
 }
+
+int apb_ctrl_coldboot(struct device *dev)
+{
+	return coldboot_seq(to_platform_device(dev));
+}
+
+int apb_ctrl_fw_flashing(struct device *dev)
+{
+	return fw_flashing_seq(to_platform_device(dev));
+}
+
+int apb_ctrl_standby_boot(struct device *dev)
+{
+	return standby_boot_seq(to_platform_device(dev));
+}
+
+void apb_ctrl_poweroff(struct device *dev)
+{
+	poweroff_seq(to_platform_device(dev));
+}
+
+static ssize_t state_store(struct device *dev,
+		struct device_attribute *attr, const char *buf, size_t count)
+{
+	struct platform_device *pdev = to_platform_device(dev);
+	struct arche_apb_ctrl_drvdata *apb = platform_get_drvdata(pdev);
+	int ret = 0;
+	bool is_disabled;
+
+	if (sysfs_streq(buf, "off")) {
+		if (apb->state == ARCHE_PLATFORM_STATE_OFF)
+			return count;
+
+		poweroff_seq(pdev);
+	} else if (sysfs_streq(buf, "active")) {
+		if (apb->state == ARCHE_PLATFORM_STATE_ACTIVE)
+			return count;
+
+		poweroff_seq(pdev);
+		is_disabled = apb->init_disabled;
+		apb->init_disabled = false;
+		ret = coldboot_seq(pdev);
+		if (ret)
+			apb->init_disabled = is_disabled;
+	} else if (sysfs_streq(buf, "standby")) {
+		if (apb->state == ARCHE_PLATFORM_STATE_STANDBY)
+			return count;
+
+		ret = standby_boot_seq(pdev);
+	} else if (sysfs_streq(buf, "fw_flashing")) {
+		if (apb->state == ARCHE_PLATFORM_STATE_FW_FLASHING)
+			return count;
+
+		/* First we want to make sure we power off everything
+		 * and then enter FW flashing state */
+		poweroff_seq(pdev);
+		ret = fw_flashing_seq(pdev);
+	} else {
+		dev_err(dev, "unknown state\n");
+		ret = -EINVAL;
+	}
+
+	return ret ? ret : count;
+}
+
+static ssize_t state_show(struct device *dev,
+		struct device_attribute *attr, char *buf)
+{
+	struct arche_apb_ctrl_drvdata *apb = dev_get_drvdata(dev);
+
+	switch (apb->state) {
+	case ARCHE_PLATFORM_STATE_OFF:
+		return sprintf(buf, "off%s\n",
+				apb->init_disabled ? ",disabled" : "");
+	case ARCHE_PLATFORM_STATE_ACTIVE:
+		return sprintf(buf, "active\n");
+	case ARCHE_PLATFORM_STATE_STANDBY:
+		return sprintf(buf, "standby\n");
+	case ARCHE_PLATFORM_STATE_FW_FLASHING:
+		return sprintf(buf, "fw_flashing\n");
+	default:
+		return sprintf(buf, "unknown state\n");
+	}
+}
+
+static DEVICE_ATTR_RW(state);
 
 static int apb_ctrl_get_devtree_data(struct platform_device *pdev,
 		struct arche_apb_ctrl_drvdata *apb)
 {
 	struct device *dev = &pdev->dev;
 	struct device_node *np = dev->of_node;
+	int ret;
 
 	apb->resetn_gpio = of_get_named_gpio(np, "reset-gpios", 0);
 	if (apb->resetn_gpio < 0) {
 		dev_err(dev, "failed to get reset gpio\n");
 		return apb->resetn_gpio;
 	}
+	ret = devm_gpio_request_one(dev, apb->resetn_gpio,
+			GPIOF_OUT_INIT_LOW, "apb-reset");
+	if (ret) {
+		dev_err(dev, "Failed requesting reset gpio %d\n",
+				apb->resetn_gpio);
+		return ret;
+	}
 
 	apb->boot_ret_gpio = of_get_named_gpio(np, "boot-ret-gpios", 0);
 	if (apb->boot_ret_gpio < 0) {
 		dev_err(dev, "failed to get boot retention gpio\n");
 		return apb->boot_ret_gpio;
+	}
+	ret = devm_gpio_request_one(dev, apb->boot_ret_gpio,
+			GPIOF_OUT_INIT_LOW, "boot retention");
+	if (ret) {
+		dev_err(dev, "Failed requesting bootret gpio %d\n",
+				apb->boot_ret_gpio);
+		return ret;
 	}
 
 	/* It's not mandatory to support power management interface */
@@ -184,11 +309,27 @@ static int apb_ctrl_get_devtree_data(struct platform_device *pdev,
 		dev_err(dev, "failed to get power off gpio\n");
 		return apb->pwroff_gpio;
 	}
+	ret = devm_gpio_request_one(dev, apb->pwroff_gpio,
+			GPIOF_IN, "pwroff_n");
+	if (ret) {
+		dev_err(dev, "Failed requesting pwroff_n gpio %d\n",
+				apb->pwroff_gpio);
+		return ret;
+	}
 
 	/* Do not make clock mandatory as of now (for DB3) */
 	apb->clk_en_gpio = of_get_named_gpio(np, "clock-en-gpio", 0);
-	if (apb->clk_en_gpio < 0)
+	if (apb->clk_en_gpio < 0) {
 		dev_warn(dev, "failed to get clock en gpio\n");
+	} else if (gpio_is_valid(apb->clk_en_gpio)) {
+		ret = devm_gpio_request_one(dev, apb->clk_en_gpio,
+				GPIOF_OUT_INIT_LOW, "apb_clk_en");
+		if (ret) {
+			dev_warn(dev, "Failed requesting APB clock en gpio %d\n",
+					apb->clk_en_gpio);
+			return ret;
+		}
+	}
 
 	apb->pwrdn_gpio = of_get_named_gpio(np, "pwr-down-gpios", 0);
 	if (apb->pwrdn_gpio < 0)
@@ -217,25 +358,6 @@ static int apb_ctrl_get_devtree_data(struct platform_device *pdev,
 	return 0;
 }
 
-static void apb_ctrl_cleanup(struct arche_apb_ctrl_drvdata *apb)
-{
-	/* disable the clock */
-	if (gpio_is_valid(apb->clk_en_gpio))
-		gpio_set_value(apb->clk_en_gpio, 0);
-
-	if (!IS_ERR(apb->vcore) && regulator_is_enabled(apb->vcore) > 0)
-		regulator_disable(apb->vcore);
-
-	if (!IS_ERR(apb->vio) && regulator_is_enabled(apb->vio) > 0)
-		regulator_disable(apb->vio);
-
-	/* As part of exit, put APB back in reset state */
-	assert_reset(apb->resetn_gpio);
-	apb->state = APB_STATE_OFF;
-
-	/* TODO: May have to send an event to SVC about this exit */
-}
-
 int arche_apb_ctrl_probe(struct platform_device *pdev)
 {
 	int ret;
@@ -252,20 +374,20 @@ int arche_apb_ctrl_probe(struct platform_device *pdev)
 		return ret;
 	}
 
-	ret = apb_ctrl_init_seq(pdev, apb);
-	if (ret) {
-		dev_err(dev, "failed to set init state of control signal %d\n",
-				ret);
-		return ret;
-	}
-
-	/* deassert reset to APB : Active-low signal */
-	deassert_reset(apb->resetn_gpio);
-	apb->state = APB_STATE_ACTIVE;
+	/* Initially set APB to OFF state */
+	apb->state = ARCHE_PLATFORM_STATE_OFF;
+	/* Check whether device needs to be enabled on boot */
+	if (of_property_read_bool(pdev->dev.of_node, "ara,init-disable"))
+		apb->init_disabled = true;
 
 	platform_set_drvdata(pdev, apb);
 
-	export_gpios(apb);
+	/* Create sysfs interface to allow user to change state dynamically */
+	ret = device_create_file(dev, &dev_attr_state);
+	if (ret) {
+		dev_err(dev, "failed to create state file in sysfs\n");
+		return ret;
+	}
 
 	dev_info(&pdev->dev, "Device registered successfully\n");
 	return 0;
@@ -273,11 +395,9 @@ int arche_apb_ctrl_probe(struct platform_device *pdev)
 
 int arche_apb_ctrl_remove(struct platform_device *pdev)
 {
-	struct arche_apb_ctrl_drvdata *apb = platform_get_drvdata(pdev);
-
-	apb_ctrl_cleanup(apb);
+	device_remove_file(&pdev->dev, &dev_attr_state);
+	poweroff_seq(pdev);
 	platform_set_drvdata(pdev, NULL);
-	unexport_gpios(apb);
 
 	return 0;
 }

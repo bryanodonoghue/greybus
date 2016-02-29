@@ -195,6 +195,9 @@ struct gb_control_interface_version_response {
 /* request to control the CSI transmitter */
 #define GB_APB_REQUEST_AUDIO_CONTROL	0x09
 
+/* vendor requests to enable/disable FCT tokens flow */
+#define GB_APB_REQUEST_FCT_FLOW_EN	0x0b
+#define GB_APB_REQUEST_FCT_FLOW_DIS	0x0c
 
 /* Firmware Protocol */
 
@@ -1053,8 +1056,14 @@ struct gb_uart_serial_state_request {
 #define GB_LOOPBACK_TYPE_TRANSFER		0x03
 #define GB_LOOPBACK_TYPE_SINK			0x04
 
+/*
+ * Loopback request/response header format should be identical
+ * to simplify bandwidth and data movement analysis.
+ */
 struct gb_loopback_transfer_request {
 	__le32	len;
+	__le32  reserved0;
+	__le32  reserved1;
 	__u8	data[0];
 } __packed;
 
@@ -1270,7 +1279,10 @@ struct gb_camera_configure_streams_response {
 	__u8 num_streams;
 	__u8 flags;
 #define GB_CAMERA_CONFIGURE_STREAMS_ADJUSTED	0x01
-	__le16 padding;
+	__u8 num_lanes;
+	__u8 padding;
+	__le32 bus_freq;
+	__le32 lines_per_second;
 	struct gb_camera_stream_config_response config[0];
 } __packed;
 
