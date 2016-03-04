@@ -122,6 +122,9 @@ struct gb_protocol_version_response {
 #define GB_CONTROL_TYPE_GET_MANIFEST		0x04
 #define GB_CONTROL_TYPE_CONNECTED		0x05
 #define GB_CONTROL_TYPE_DISCONNECTED		0x06
+#define GB_CONTROL_TYPE_TIMESYNC_ENABLE		0x07
+#define GB_CONTROL_TYPE_TIMESYNC_DISABLE	0x08
+#define GB_CONTROL_TYPE_TIMESYNC_AUTHORITATIVE	0x09
 #define GB_CONTROL_TYPE_INTERFACE_VERSION	0x0a
 #define GB_CONTROL_TYPE_BUNDLE_VERSION		0x0b
 
@@ -170,6 +173,20 @@ struct gb_control_interface_version_response {
 	__le16			minor;
 } __packed;
 
+#define GB_TIMESYNC_MAX_STROBES			0x04
+
+struct gb_control_timesync_enable_request {
+	__u8	count;
+	__u64	frame_time;
+	__u32	strobe_delay;
+	__u32	refclk;
+} __packed;
+/* timesync enable response has no payload */
+
+struct gb_control_timesync_authoritative_request {
+	__u64	frame_time[GB_TIMESYNC_MAX_STROBES];
+} __packed;
+/* timesync authoritative response has no payload */
 
 /* APBridge protocol */
 
@@ -495,27 +512,12 @@ struct gb_hid_input_report_request {
 
 /* Greybus i2c request types */
 #define GB_I2C_TYPE_FUNCTIONALITY	0x02
-#define GB_I2C_TYPE_TIMEOUT		0x03
-#define GB_I2C_TYPE_RETRIES		0x04
 #define GB_I2C_TYPE_TRANSFER		0x05
-
-#define GB_I2C_RETRIES_DEFAULT		3
-#define GB_I2C_TIMEOUT_DEFAULT		1000	/* milliseconds */
 
 /* functionality request has no payload */
 struct gb_i2c_functionality_response {
 	__le32	functionality;
 } __packed;
-
-struct gb_i2c_timeout_request {
-	__le16	msec;
-} __packed;
-/* timeout response has no payload */
-
-struct gb_i2c_retries_request {
-	__u8	retries;
-} __packed;
-/* retries response has no payload */
 
 /*
  * Outgoing data immediately follows the op count and ops array.
@@ -786,21 +788,24 @@ struct gb_spi_transfer_response {
 #define GB_SVC_VERSION_MINOR		0x01
 
 /* Greybus SVC request types */
-#define GB_SVC_TYPE_SVC_HELLO		0x02
-#define GB_SVC_TYPE_INTF_DEVICE_ID	0x03
-#define GB_SVC_TYPE_INTF_HOTPLUG	0x04
-#define GB_SVC_TYPE_INTF_HOT_UNPLUG	0x05
-#define GB_SVC_TYPE_INTF_RESET		0x06
-#define GB_SVC_TYPE_CONN_CREATE		0x07
-#define GB_SVC_TYPE_CONN_DESTROY	0x08
-#define GB_SVC_TYPE_DME_PEER_GET	0x09
-#define GB_SVC_TYPE_DME_PEER_SET	0x0a
-#define GB_SVC_TYPE_ROUTE_CREATE	0x0b
-#define GB_SVC_TYPE_ROUTE_DESTROY	0x0c
-#define GB_SVC_TYPE_INTF_SET_PWRM	0x10
-#define GB_SVC_TYPE_INTF_EJECT		0x11
-#define GB_SVC_TYPE_KEY_EVENT		0x12
-#define GB_SVC_TYPE_PING		0x13
+#define GB_SVC_TYPE_SVC_HELLO			0x02
+#define GB_SVC_TYPE_INTF_DEVICE_ID		0x03
+#define GB_SVC_TYPE_INTF_HOTPLUG		0x04
+#define GB_SVC_TYPE_INTF_HOT_UNPLUG		0x05
+#define GB_SVC_TYPE_INTF_RESET			0x06
+#define GB_SVC_TYPE_CONN_CREATE			0x07
+#define GB_SVC_TYPE_CONN_DESTROY		0x08
+#define GB_SVC_TYPE_DME_PEER_GET		0x09
+#define GB_SVC_TYPE_DME_PEER_SET		0x0a
+#define GB_SVC_TYPE_ROUTE_CREATE		0x0b
+#define GB_SVC_TYPE_ROUTE_DESTROY		0x0c
+#define GB_SVC_TYPE_TIMESYNC_ENABLE		0x0d
+#define GB_SVC_TYPE_TIMESYNC_DISABLE		0x0e
+#define GB_SVC_TYPE_TIMESYNC_AUTHORITATIVE	0x0f
+#define GB_SVC_TYPE_INTF_SET_PWRM		0x10
+#define GB_SVC_TYPE_INTF_EJECT			0x11
+#define GB_SVC_TYPE_KEY_EVENT			0x12
+#define GB_SVC_TYPE_PING			0x13
 
 /*
  * SVC version request/response has the same payload as
@@ -914,6 +919,20 @@ struct gb_svc_route_destroy_request {
 	__u8	intf2_id;
 } __packed;
 /* route destroy response has no payload */
+
+struct gb_svc_timesync_enable_request {
+	__u8	count;
+	__u64	frame_time;
+	__u32	strobe_delay;
+	__u32	strobe_mask;
+	__u32	refclk;
+} __packed;
+/* timesync enable response has no payload */
+
+/* timesync authoritative request has no payload */
+struct gb_svc_timesync_authoritative_response {
+	__u64	frame_time[GB_TIMESYNC_MAX_STROBES];
+};
 
 #define GB_SVC_UNIPRO_FAST_MODE			0x01
 #define GB_SVC_UNIPRO_SLOW_MODE			0x02
