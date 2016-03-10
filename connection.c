@@ -119,6 +119,7 @@ static void gb_connection_init_name(struct gb_connection *connection)
  * @bundle:		remote-interface bundle (may be NULL)
  * @cport_id:		remote-interface cport id, or 0 for static connections
  * @handler:		request handler (may be NULL)
+ * @flags:		connection flags
  *
  * Create a Greybus connection, representing the bidirectional link
  * between a CPort on a (local) Greybus host device and a CPort on
@@ -137,7 +138,8 @@ static struct gb_connection *
 _gb_connection_create(struct gb_host_device *hd, int hd_cport_id,
 				struct gb_interface *intf,
 				struct gb_bundle *bundle, int cport_id,
-				gb_request_handler_t handler)
+				gb_request_handler_t handler,
+				unsigned long flags)
 {
 	struct gb_connection *connection;
 	struct ida *id_map = &hd->cport_id_map;
@@ -180,6 +182,7 @@ _gb_connection_create(struct gb_host_device *hd, int hd_cport_id,
 	connection->intf = intf;
 	connection->bundle = bundle;
 	connection->handler = handler;
+	connection->flags = flags;
 	connection->state = GB_CONNECTION_STATE_DISABLED;
 
 	atomic_set(&connection->op_cycle, 0);
@@ -226,13 +229,14 @@ struct gb_connection *
 gb_connection_create_static(struct gb_host_device *hd, u16 hd_cport_id,
 					gb_request_handler_t handler)
 {
-	return _gb_connection_create(hd, hd_cport_id, NULL, NULL, 0, handler);
+	return _gb_connection_create(hd, hd_cport_id, NULL, NULL, 0, handler,
+					0);
 }
 
 struct gb_connection *
 gb_connection_create_control(struct gb_interface *intf)
 {
-	return _gb_connection_create(intf->hd, -1, intf, NULL, 0, NULL);
+	return _gb_connection_create(intf->hd, -1, intf, NULL, 0, NULL, 0);
 }
 
 struct gb_connection *
@@ -242,9 +246,21 @@ gb_connection_create(struct gb_bundle *bundle, u16 cport_id,
 	struct gb_interface *intf = bundle->intf;
 
 	return _gb_connection_create(intf->hd, -1, intf, bundle, cport_id,
-					handler);
+					handler, 0);
 }
 EXPORT_SYMBOL_GPL(gb_connection_create);
+
+struct gb_connection *
+gb_connection_create_flags(struct gb_bundle *bundle, u16 cport_id,
+					gb_request_handler_t handler,
+					unsigned long flags)
+{
+	struct gb_interface *intf = bundle->intf;
+
+	return _gb_connection_create(intf->hd, -1, intf, bundle, cport_id,
+					handler, flags);
+}
+EXPORT_SYMBOL_GPL(gb_connection_create_flags);
 
 static int gb_connection_hd_cport_enable(struct gb_connection *connection)
 {
@@ -274,17 +290,18 @@ static void gb_connection_hd_cport_disable(struct gb_connection *connection)
 	hd->driver->cport_disable(hd, connection->hd_cport_id);
 }
 
-static int gb_connection_hd_fct_flow_enable(struct gb_connection *connection)
+static int
+gb_connection_hd_cport_features_enable(struct gb_connection *connection)
 {
 	struct gb_host_device *hd = connection->hd;
 	int ret;
 
-	if (!hd->driver->fct_flow_enable)
+	if (!hd->driver->cport_features_enable)
 		return 0;
 
-	ret = hd->driver->fct_flow_enable(hd, connection->hd_cport_id);
+	ret = hd->driver->cport_features_enable(hd, connection->hd_cport_id);
 	if (ret) {
-		dev_err(&hd->dev, "%s: failed to enable FCT flow: %d\n",
+		dev_err(&hd->dev, "%s: failed to enable CPort features: %d\n",
 			connection->name, ret);
 		return ret;
 	}
@@ -292,14 +309,15 @@ static int gb_connection_hd_fct_flow_enable(struct gb_connection *connection)
 	return 0;
 }
 
-static void gb_connection_hd_fct_flow_disable(struct gb_connection *connection)
+static void
+gb_connection_hd_cport_features_disable(struct gb_connection *connection)
 {
 	struct gb_host_device *hd = connection->hd;
 
-	if (!hd->driver->fct_flow_disable)
+	if (!hd->driver->cport_features_disable)
 		return;
 
-	hd->driver->fct_flow_disable(hd, connection->hd_cport_id);
+	hd->driver->cport_features_disable(hd, connection->hd_cport_id);
 }
 
 /*
@@ -311,18 +329,29 @@ gb_connection_svc_connection_create(struct gb_connection *connection)
 {
 	struct gb_host_device *hd = connection->hd;
 	struct gb_interface *intf;
+	u8 cport_flags;
 	int ret;
 
 	if (gb_connection_is_static(connection))
-		return gb_connection_hd_fct_flow_enable(connection);
+		return gb_connection_hd_cport_features_enable(connection);
 
 	intf = connection->intf;
+
+	/* The ES2/ES3 bootrom requires E2EFC, CSD and CSV to be disabled. */
+	cport_flags = GB_SVC_CPORT_FLAG_CSV_N;
+	if (intf->boot_over_unipro) {
+		cport_flags |= GB_SVC_CPORT_FLAG_CSD_N;
+	} else if (gb_connection_e2efc_enabled(connection)) {
+		cport_flags |= GB_SVC_CPORT_FLAG_CSD_N |
+				GB_SVC_CPORT_FLAG_E2EFC;
+	}
+
 	ret = gb_svc_connection_create(hd->svc,
 			hd->svc->ap_intf_id,
 			connection->hd_cport_id,
 			intf->interface_id,
 			connection->intf_cport_id,
-			intf->boot_over_unipro);
+			cport_flags);
 	if (ret) {
 		dev_err(&connection->hd->dev,
 			"%s: failed to create svc connection: %d\n",
@@ -330,7 +359,7 @@ gb_connection_svc_connection_create(struct gb_connection *connection)
 		return ret;
 	}
 
-	ret = gb_connection_hd_fct_flow_enable(connection);
+	ret = gb_connection_hd_cport_features_enable(connection);
 	if (ret) {
 		gb_svc_connection_destroy(hd->svc, hd->svc->ap_intf_id,
 					  connection->hd_cport_id,
@@ -345,7 +374,7 @@ gb_connection_svc_connection_create(struct gb_connection *connection)
 static void
 gb_connection_svc_connection_destroy(struct gb_connection *connection)
 {
-	gb_connection_hd_fct_flow_disable(connection);
+	gb_connection_hd_cport_features_disable(connection);
 
 	if (gb_connection_is_static(connection))
 		return;
