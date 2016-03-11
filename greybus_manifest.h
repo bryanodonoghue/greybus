@@ -23,7 +23,7 @@ enum greybus_descriptor_type {
 
 enum greybus_protocol {
 	GREYBUS_PROTOCOL_CONTROL	= 0x00,
-	GREYBUS_PROTOCOL_AP		= 0x01,
+	/* 0x01 is unused */
 	GREYBUS_PROTOCOL_GPIO		= 0x02,
 	GREYBUS_PROTOCOL_I2C		= 0x03,
 	GREYBUS_PROTOCOL_UART		= 0x04,
@@ -52,7 +52,7 @@ enum greybus_protocol {
 
 enum greybus_class_type {
 	GREYBUS_CLASS_CONTROL		= 0x00,
-	GREYBUS_CLASS_AP		= 0x01,
+	/* 0x01 is unused */
 	GREYBUS_CLASS_GPIO		= 0x02,
 	GREYBUS_CLASS_I2C		= 0x03,
 	GREYBUS_CLASS_UART		= 0x04,
@@ -71,7 +71,7 @@ enum greybus_class_type {
 	GREYBUS_CLASS_LOOPBACK		= 0x11,
 	GREYBUS_CLASS_AUDIO		= 0x12,
 	/* 0x13 is unused */
-	GREYBUS_CLASS_SVC		= 0x14,
+	/* 0x14 is unused */
 	GREYBUS_CLASS_FIRMWARE		= 0x15,
 		/* ... */
 	GREYBUS_CLASS_RAW		= 0xfe,

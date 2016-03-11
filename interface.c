@@ -54,9 +54,6 @@ static struct attribute *interface_attrs[] = {
 ATTRIBUTE_GROUPS(interface);
 
 
-/* XXX This could be per-host device */
-static DEFINE_SPINLOCK(gb_interfaces_lock);
-
 // FIXME, odds are you don't want to call this function, rework the caller to
 // not need it please.
 struct gb_interface *gb_interface_find(struct gb_host_device *hd,
@@ -100,6 +97,9 @@ struct device_type greybus_interface_type = {
  *
  * Returns a pointer to the new interfce or a null pointer if a
  * failure occurs due to memory exhaustion.
+ *
+ * Locking: Caller ensures serialisation with gb_interface_remove and
+ * gb_interface_find.
  */
 struct gb_interface *gb_interface_create(struct gb_host_device *hd,
 					 u8 interface_id)
@@ -132,63 +132,20 @@ struct gb_interface *gb_interface_create(struct gb_host_device *hd,
 		return NULL;
 	}
 
-	spin_lock_irq(&gb_interfaces_lock);
 	list_add(&intf->links, &hd->interfaces);
-	spin_unlock_irq(&gb_interfaces_lock);
 
 	return intf;
 }
 
 /*
- * Tear down a previously set up interface.
+ * Enable an interface by enabling its control connection and fetching the
+ * manifest and other information over it.
  */
-void gb_interface_remove(struct gb_interface *intf)
-{
-	struct gb_bundle *bundle;
-	struct gb_bundle *next;
-
-	if (intf->disconnected)
-		gb_control_disable(intf->control);
-
-	list_for_each_entry_safe(bundle, next, &intf->bundles, links)
-		gb_bundle_destroy(bundle);
-
-	if (device_is_registered(&intf->dev)) {
-		device_del(&intf->dev);
-		dev_info(&intf->dev, "Interface removed\n");
-	}
-
-	gb_control_disable(intf->control);
-
-	spin_lock_irq(&gb_interfaces_lock);
-	list_del(&intf->links);
-	spin_unlock_irq(&gb_interfaces_lock);
-
-	put_device(&intf->dev);
-}
-
-void gb_interfaces_remove(struct gb_host_device *hd)
-{
-	struct gb_interface *intf, *temp;
-
-	list_for_each_entry_safe(intf, temp, &hd->interfaces, links)
-		gb_interface_remove(intf);
-}
-
-/**
- * gb_interface_init
- *
- * Create connection for control CPort and then request/parse manifest.
- * Finally initialize all the bundles to set routes via SVC and initialize all
- * connections.
- */
-int gb_interface_init(struct gb_interface *intf, u8 device_id)
+int gb_interface_enable(struct gb_interface *intf)
 {
 	struct gb_bundle *bundle, *tmp;
 	int ret, size;
 	void *manifest;
-
-	intf->device_id = device_id;
 
 	/* Establish control connection */
 	ret = gb_control_enable(intf->control);
@@ -199,21 +156,26 @@ int gb_interface_init(struct gb_interface *intf, u8 device_id)
 	size = gb_control_get_manifest_size_operation(intf);
 	if (size <= 0) {
 		dev_err(&intf->dev, "failed to get manifest size: %d\n", size);
+
 		if (size)
-			return size;
+			ret = size;
 		else
-			return -EINVAL;
+			ret =  -EINVAL;
+
+		goto err_disable_control;
 	}
 
 	manifest = kmalloc(size, GFP_KERNEL);
-	if (!manifest)
-		return -ENOMEM;
+	if (!manifest) {
+		ret = -ENOMEM;
+		goto err_disable_control;
+	}
 
 	/* Get manifest using control protocol on CPort */
 	ret = gb_control_get_manifest_operation(intf, manifest, size);
 	if (ret) {
 		dev_err(&intf->dev, "failed to get manifest: %d\n", ret);
-		goto free_manifest;
+		goto err_free_manifest;
 	}
 
 	/*
@@ -223,22 +185,61 @@ int gb_interface_init(struct gb_interface *intf, u8 device_id)
 	if (!gb_manifest_parse(intf, manifest, size)) {
 		dev_err(&intf->dev, "failed to parse manifest\n");
 		ret = -EINVAL;
-		goto free_manifest;
+		goto err_destroy_bundles;
 	}
 
 	ret = gb_control_get_interface_version_operation(intf);
 	if (ret)
-		goto free_manifest;
+		goto err_destroy_bundles;
 
 	ret = gb_control_get_bundle_versions(intf->control);
 	if (ret)
-		goto free_manifest;
+		goto err_destroy_bundles;
 
-	/* Register the interface and its bundles. */
+	kfree(manifest);
+
+	return 0;
+
+err_destroy_bundles:
+	list_for_each_entry_safe(bundle, tmp, &intf->bundles, links)
+		gb_bundle_destroy(bundle);
+err_free_manifest:
+	kfree(manifest);
+err_disable_control:
+	gb_control_disable(intf->control);
+
+	return ret;
+}
+
+/* Disable an interface and destroy its bundles. */
+void gb_interface_disable(struct gb_interface *intf)
+{
+	struct gb_bundle *bundle;
+	struct gb_bundle *next;
+
+	/*
+	 * Disable the control-connection early to avoid operation timeouts
+	 * when the interface is already gone.
+	 */
+	if (intf->disconnected)
+		gb_control_disable(intf->control);
+
+	list_for_each_entry_safe(bundle, next, &intf->bundles, links)
+		gb_bundle_destroy(bundle);
+
+	gb_control_disable(intf->control);
+}
+
+/* Register an interface and its bundles. */
+int gb_interface_add(struct gb_interface *intf)
+{
+	struct gb_bundle *bundle, *tmp;
+	int ret;
+
 	ret = device_add(&intf->dev);
 	if (ret) {
 		dev_err(&intf->dev, "failed to register interface: %d\n", ret);
-		goto free_manifest;
+		return ret;
 	}
 
 	dev_info(&intf->dev, "Interface added: VID=0x%08x, PID=0x%08x\n",
@@ -254,9 +255,18 @@ int gb_interface_init(struct gb_interface *intf, u8 device_id)
 		}
 	}
 
-	ret = 0;
+	return 0;
+}
 
-free_manifest:
-	kfree(manifest);
-	return ret;
+/* Deregister an interface and drop its reference. */
+void gb_interface_remove(struct gb_interface *intf)
+{
+	if (device_is_registered(&intf->dev)) {
+		device_del(&intf->dev);
+		dev_info(&intf->dev, "Interface removed\n");
+	}
+
+	list_del(&intf->links);
+
+	put_device(&intf->dev);
 }

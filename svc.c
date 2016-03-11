@@ -14,6 +14,8 @@
 
 #define SVC_KEY_ARA_BUTTON	KEY_A
 
+#define SVC_INTF_EJECT_TIMEOUT	9000
+
 struct gb_svc_deferred_request {
 	struct work_struct work;
 	struct gb_operation *operation;
@@ -131,6 +133,7 @@ EXPORT_SYMBOL_GPL(gb_svc_intf_reset);
 int gb_svc_intf_eject(struct gb_svc *svc, u8 intf_id)
 {
 	struct gb_svc_intf_eject_request request;
+	int ret;
 
 	request.intf_id = intf_id;
 
@@ -138,12 +141,17 @@ int gb_svc_intf_eject(struct gb_svc *svc, u8 intf_id)
 	 * The pulse width for module release in svc is long so we need to
 	 * increase the timeout so the operation will not return to soon.
 	 */
-	return gb_operation_sync_timeout(svc->connection,
-					 GB_SVC_TYPE_INTF_EJECT, &request,
-					 sizeof(request), NULL, 0,
-					 GB_SVC_EJECT_TIME);
+	ret = gb_operation_sync_timeout(svc->connection,
+					GB_SVC_TYPE_INTF_EJECT, &request,
+					sizeof(request), NULL, 0,
+					SVC_INTF_EJECT_TIMEOUT);
+	if (ret) {
+		dev_err(&svc->dev, "failed to eject interface %u\n", intf_id);
+		return ret;
+	}
+
+	return 0;
 }
-EXPORT_SYMBOL_GPL(gb_svc_intf_eject);
 
 int gb_svc_dme_peer_get(struct gb_svc *svc, u8 intf_id, u16 attr, u16 selector,
 			u32 *value)
@@ -463,21 +471,79 @@ static int gb_svc_hello(struct gb_operation *op)
 	return 0;
 }
 
-static void gb_svc_intf_remove(struct gb_svc *svc, struct gb_interface *intf)
+static int gb_svc_interface_route_create(struct gb_svc *svc,
+						struct gb_interface *intf)
 {
 	u8 intf_id = intf->interface_id;
-	u8 device_id = intf->device_id;
-
-	intf->disconnected = true;
-
-	gb_interface_remove(intf);
+	u8 device_id;
+	int ret;
 
 	/*
-	 * Destroy the two-way route between the AP and the interface.
+	 * Create a device id for the interface:
+	 * - device id 0 (GB_DEVICE_ID_SVC) belongs to the SVC
+	 * - device id 1 (GB_DEVICE_ID_AP) belongs to the AP
+	 *
+	 * XXX Do we need to allocate device ID for SVC or the AP here? And what
+	 * XXX about an AP with multiple interface blocks?
 	 */
-	gb_svc_route_destroy(svc, svc->ap_intf_id, intf_id);
+	ret = ida_simple_get(&svc->device_id_map,
+			     GB_DEVICE_ID_MODULES_START, 0, GFP_KERNEL);
+	if (ret < 0) {
+		dev_err(&svc->dev, "failed to allocate device id for interface %u: %d\n",
+				intf_id, ret);
+		return ret;
+	}
+	device_id = ret;
 
+	ret = gb_svc_intf_device_id(svc, intf_id, device_id);
+	if (ret) {
+		dev_err(&svc->dev, "failed to set device id %u for interface %u: %d\n",
+				device_id, intf_id, ret);
+		goto err_ida_remove;
+	}
+
+	/* Create a two-way route between the AP and the new interface. */
+	ret = gb_svc_route_create(svc, svc->ap_intf_id, GB_DEVICE_ID_AP,
+				  intf_id, device_id);
+	if (ret) {
+		dev_err(&svc->dev, "failed to create route to interface %u (device id %u): %d\n",
+				intf_id, device_id, ret);
+		goto err_svc_id_free;
+	}
+
+	intf->device_id = device_id;
+
+	return 0;
+
+err_svc_id_free:
+	/*
+	 * XXX Should we tell SVC that this id doesn't belong to interface
+	 * XXX anymore.
+	 */
+err_ida_remove:
 	ida_simple_remove(&svc->device_id_map, device_id);
+
+	return ret;
+}
+
+static void gb_svc_interface_route_destroy(struct gb_svc *svc,
+						struct gb_interface *intf)
+{
+	if (intf->device_id == GB_DEVICE_ID_BAD)
+		return;
+
+	gb_svc_route_destroy(svc, svc->ap_intf_id, intf->interface_id);
+	ida_simple_remove(&svc->device_id_map, intf->device_id);
+	intf->device_id = GB_DEVICE_ID_BAD;
+}
+
+static void gb_svc_intf_remove(struct gb_svc *svc, struct gb_interface *intf)
+{
+	intf->disconnected = true;
+
+	gb_interface_disable(intf);
+	gb_svc_interface_route_destroy(svc, intf);
+	gb_interface_remove(intf);
 }
 
 static void gb_svc_process_intf_hotplug(struct gb_operation *operation)
@@ -487,7 +553,7 @@ static void gb_svc_process_intf_hotplug(struct gb_operation *operation)
 	struct gb_svc *svc = connection->private;
 	struct gb_host_device *hd = connection->hd;
 	struct gb_interface *intf;
-	u8 intf_id, device_id;
+	u8 intf_id;
 	u32 vendor_id = 0;
 	u32 product_id = 0;
 	int ret;
@@ -558,64 +624,22 @@ static void gb_svc_process_intf_hotplug(struct gb_operation *operation)
 	if (ret) {
 		dev_err(&svc->dev, "failed to clear boot status of interface %u: %d\n",
 				intf_id, ret);
-		goto destroy_interface;
+		goto out_interface_add;
 	}
 
-	/*
-	 * Create a device id for the interface:
-	 * - device id 0 (GB_DEVICE_ID_SVC) belongs to the SVC
-	 * - device id 1 (GB_DEVICE_ID_AP) belongs to the AP
-	 *
-	 * XXX Do we need to allocate device ID for SVC or the AP here? And what
-	 * XXX about an AP with multiple interface blocks?
-	 */
-	device_id = ida_simple_get(&svc->device_id_map,
-				   GB_DEVICE_ID_MODULES_START, 0, GFP_KERNEL);
-	if (device_id < 0) {
-		ret = device_id;
-		dev_err(&svc->dev, "failed to allocate device id for interface %u: %d\n",
+	ret = gb_svc_interface_route_create(svc, intf);
+	if (ret)
+		goto out_interface_add;
+
+	ret = gb_interface_enable(intf);
+	if (ret) {
+		dev_err(&svc->dev, "failed to enable interface %u: %d\n",
 				intf_id, ret);
-		goto destroy_interface;
+		goto out_interface_add;
 	}
 
-	ret = gb_svc_intf_device_id(svc, intf_id, device_id);
-	if (ret) {
-		dev_err(&svc->dev, "failed to set device id %u for interface %u: %d\n",
-				device_id, intf_id, ret);
-		goto ida_put;
-	}
-
-	/*
-	 * Create a two-way route between the AP and the new interface
-	 */
-	ret = gb_svc_route_create(svc, svc->ap_intf_id, GB_DEVICE_ID_AP,
-				  intf_id, device_id);
-	if (ret) {
-		dev_err(&svc->dev, "failed to create route to interface %u (device id %u): %d\n",
-				intf_id, device_id, ret);
-		goto svc_id_free;
-	}
-
-	ret = gb_interface_init(intf, device_id);
-	if (ret) {
-		dev_err(&svc->dev, "failed to initialize interface %u (device id %u): %d\n",
-				intf_id, device_id, ret);
-		goto destroy_route;
-	}
-
-	return;
-
-destroy_route:
-	gb_svc_route_destroy(svc, svc->ap_intf_id, intf_id);
-svc_id_free:
-	/*
-	 * XXX Should we tell SVC that this id doesn't belong to interface
-	 * XXX anymore.
-	 */
-ida_put:
-	ida_simple_remove(&svc->device_id_map, device_id);
-destroy_interface:
-	gb_interface_remove(intf);
+out_interface_add:
+	gb_interface_add(intf);
 }
 
 static void gb_svc_process_intf_hot_unplug(struct gb_operation *operation)
@@ -978,6 +1002,16 @@ int gb_svc_add(struct gb_svc *svc)
 	return 0;
 }
 
+static void gb_svc_remove_interfaces(struct gb_svc *svc)
+{
+	struct gb_interface *intf, *tmp;
+
+	list_for_each_entry_safe(intf, tmp, &svc->hd->interfaces, links) {
+		gb_interface_disable(intf);
+		gb_interface_remove(intf);
+	}
+}
+
 void gb_svc_del(struct gb_svc *svc)
 {
 	gb_connection_disable(svc->connection);
@@ -993,6 +1027,8 @@ void gb_svc_del(struct gb_svc *svc)
 	}
 
 	flush_workqueue(svc->wq);
+
+	gb_svc_remove_interfaces(svc);
 }
 
 void gb_svc_put(struct gb_svc *svc)
