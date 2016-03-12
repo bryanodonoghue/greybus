@@ -804,6 +804,7 @@ struct gb_spi_transfer_response {
 #define GB_SVC_TYPE_PWRMON_INTF_SAMPLE_GET	0x17
 #define GB_SVC_TYPE_TIMESYNC_WD_PINS_ACQUIRE	0x18
 #define GB_SVC_TYPE_TIMESYNC_WD_PINS_RELEASE	0x19
+#define GB_SVC_TYPE_TIMESYNC_PING		0x1a
 
 /*
  * SVC version request/response has the same payload as
@@ -929,6 +930,11 @@ struct gb_svc_timesync_wd_pins_acquire_request {
 };
 
 /* timesync acquire wdm response has no payload */
+
+/* timesync svc ping request has no payload */
+struct gb_svc_timesync_ping_response {
+	__le64	frame_time;
+} __packed;
 
 #define GB_SVC_UNIPRO_FAST_MODE			0x01
 #define GB_SVC_UNIPRO_SLOW_MODE			0x02
