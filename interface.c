@@ -9,6 +9,230 @@
 
 #include "greybus.h"
 
+
+#define GB_INTERFACE_DEVICE_ID_BAD	0xff
+
+/* Don't-care selector index */
+#define DME_SELECTOR_INDEX_NULL		0
+
+/* DME attributes */
+/* FIXME: remove ES2 support and DME_T_TST_SRC_INCREMENT */
+#define DME_T_TST_SRC_INCREMENT		0x4083
+
+#define DME_DDBL1_MANUFACTURERID	0x5003
+#define DME_DDBL1_PRODUCTID		0x5004
+
+#define DME_TOSHIBA_ARA_VID		0x6000
+#define DME_TOSHIBA_ARA_PID		0x6001
+#define DME_TOSHIBA_ARA_SN0		0x6002
+#define DME_TOSHIBA_ARA_SN1		0x6003
+#define DME_TOSHIBA_ARA_INIT_STATUS	0x6101
+
+/* DDBL1 Manufacturer and Product ids */
+#define TOSHIBA_DMID			0x0126
+#define TOSHIBA_ES2_BRIDGE_DPID		0x1000
+#define TOSHIBA_ES3_APBRIDGE_DPID	0x1001
+#define TOSHIBA_ES3_GPBRIDGE_DPID	0x1002
+
+
+static int gb_interface_dme_attr_get(struct gb_interface *intf,
+							u16 attr, u32 *val)
+{
+	return gb_svc_dme_peer_get(intf->hd->svc, intf->interface_id,
+					attr, DME_SELECTOR_INDEX_NULL, val);
+}
+
+static int gb_interface_read_ara_dme(struct gb_interface *intf)
+{
+	u32 sn0, sn1;
+	int ret;
+
+	/*
+	 * Unless this is a Toshiba bridge, bail out until we have defined
+	 * standard Ara attributes.
+	 */
+	if (intf->ddbl1_manufacturer_id != TOSHIBA_DMID) {
+		dev_err(&intf->dev, "unknown manufacturer %08x\n",
+				intf->ddbl1_manufacturer_id);
+		return -ENODEV;
+	}
+
+	ret = gb_interface_dme_attr_get(intf, DME_TOSHIBA_ARA_VID,
+					&intf->vendor_id);
+	if (ret)
+		return ret;
+
+	ret = gb_interface_dme_attr_get(intf, DME_TOSHIBA_ARA_PID,
+					&intf->product_id);
+	if (ret)
+		return ret;
+
+	ret = gb_interface_dme_attr_get(intf, DME_TOSHIBA_ARA_SN0, &sn0);
+	if (ret)
+		return ret;
+
+	ret = gb_interface_dme_attr_get(intf, DME_TOSHIBA_ARA_SN1, &sn1);
+	if (ret)
+		return ret;
+
+	intf->serial_number = (u64)sn1 << 32 | sn0;
+
+	return 0;
+}
+
+static int gb_interface_read_dme(struct gb_interface *intf)
+{
+	int ret;
+
+	ret = gb_interface_dme_attr_get(intf, DME_DDBL1_MANUFACTURERID,
+					&intf->ddbl1_manufacturer_id);
+	if (ret)
+		return ret;
+
+	ret = gb_interface_dme_attr_get(intf, DME_DDBL1_PRODUCTID,
+					&intf->ddbl1_product_id);
+	if (ret)
+		return ret;
+
+	if (intf->ddbl1_manufacturer_id == TOSHIBA_DMID &&
+			intf->ddbl1_product_id == TOSHIBA_ES2_BRIDGE_DPID) {
+		intf->quirks |= GB_INTERFACE_QUIRK_NO_ARA_IDS;
+		intf->quirks |= GB_INTERFACE_QUIRK_NO_INIT_STATUS;
+	}
+
+	return gb_interface_read_ara_dme(intf);
+}
+
+static int gb_interface_route_create(struct gb_interface *intf)
+{
+	struct gb_svc *svc = intf->hd->svc;
+	u8 intf_id = intf->interface_id;
+	u8 device_id;
+	int ret;
+
+	/* Allocate an interface device id. */
+	ret = ida_simple_get(&svc->device_id_map,
+			     GB_SVC_DEVICE_ID_MIN, GB_SVC_DEVICE_ID_MAX + 1,
+			     GFP_KERNEL);
+	if (ret < 0) {
+		dev_err(&intf->dev, "failed to allocate device id: %d\n", ret);
+		return ret;
+	}
+	device_id = ret;
+
+	ret = gb_svc_intf_device_id(svc, intf_id, device_id);
+	if (ret) {
+		dev_err(&intf->dev, "failed to set device id %u: %d\n",
+				device_id, ret);
+		goto err_ida_remove;
+	}
+
+	/* FIXME: Hard-coded AP device id. */
+	ret = gb_svc_route_create(svc, svc->ap_intf_id, GB_SVC_DEVICE_ID_AP,
+				  intf_id, device_id);
+	if (ret) {
+		dev_err(&intf->dev, "failed to create route: %d\n", ret);
+		goto err_svc_id_free;
+	}
+
+	intf->device_id = device_id;
+
+	return 0;
+
+err_svc_id_free:
+	/*
+	 * XXX Should we tell SVC that this id doesn't belong to interface
+	 * XXX anymore.
+	 */
+err_ida_remove:
+	ida_simple_remove(&svc->device_id_map, device_id);
+
+	return ret;
+}
+
+static void gb_interface_route_destroy(struct gb_interface *intf)
+{
+	struct gb_svc *svc = intf->hd->svc;
+
+	if (intf->device_id == GB_INTERFACE_DEVICE_ID_BAD)
+		return;
+
+	gb_svc_route_destroy(svc, svc->ap_intf_id, intf->interface_id);
+	ida_simple_remove(&svc->device_id_map, intf->device_id);
+	intf->device_id = GB_INTERFACE_DEVICE_ID_BAD;
+}
+
+/*
+ * T_TstSrcIncrement is written by the module on ES2 as a stand-in for the
+ * init-status attribute DME_TOSHIBA_INIT_STATUS. The AP needs to read and
+ * clear it after reading a non-zero value from it.
+ *
+ * FIXME: This is module-hardware dependent and needs to be extended for every
+ * type of module we want to support.
+ */
+static int gb_interface_read_and_clear_init_status(struct gb_interface *intf)
+{
+	struct gb_host_device *hd = intf->hd;
+	int ret;
+	u32 value;
+	u16 attr;
+	u8 init_status;
+
+	/*
+	 * ES2 bridges use T_TstSrcIncrement for the init status.
+	 *
+	 * FIXME: Remove ES2 support
+	 */
+	if (intf->quirks & GB_INTERFACE_QUIRK_NO_INIT_STATUS)
+		attr = DME_T_TST_SRC_INCREMENT;
+	else
+		attr = DME_TOSHIBA_ARA_INIT_STATUS;
+
+	ret = gb_svc_dme_peer_get(hd->svc, intf->interface_id, attr,
+				  DME_SELECTOR_INDEX_NULL, &value);
+	if (ret)
+		return ret;
+
+	/*
+	 * A nonzero init status indicates the module has finished
+	 * initializing.
+	 */
+	if (!value) {
+		dev_err(&intf->dev, "invalid init status\n");
+		return -ENODEV;
+	}
+
+	/*
+	 * Extract the init status.
+	 *
+	 * For ES2: We need to check lowest 8 bits of 'value'.
+	 * For ES3: We need to check highest 8 bits out of 32 of 'value'.
+	 *
+	 * FIXME: Remove ES2 support
+	 */
+	if (intf->quirks & GB_INTERFACE_QUIRK_NO_INIT_STATUS)
+		init_status = value & 0xff;
+	else
+		init_status = value >> 24;
+
+	/*
+	 * Check if the interface is executing the quirky ES3 bootrom that
+	 * requires E2EFC, CSD and CSV to be disabled and that does not
+	 * support the interface-version request.
+	 */
+	switch (init_status) {
+	case GB_INIT_BOOTROM_UNIPRO_BOOT_STARTED:
+	case GB_INIT_BOOTROM_FALLBACK_UNIPRO_BOOT_STARTED:
+		intf->quirks |= GB_INTERFACE_QUIRK_NO_CPORT_FEATURES;
+		intf->quirks |= GB_INTERFACE_QUIRK_NO_INTERFACE_VERSION;
+		break;
+	}
+
+	/* Clear the init status. */
+	return gb_svc_dme_peer_set(hd->svc, intf->interface_id, attr,
+				   DME_SELECTOR_INDEX_NULL, 0);
+}
+
 /* interface sysfs attributes */
 #define gb_interface_attr(field, type)					\
 static ssize_t field##_show(struct device *dev,				\
@@ -116,7 +340,7 @@ struct gb_interface *gb_interface_create(struct gb_host_device *hd,
 	INIT_LIST_HEAD(&intf->manifest_descs);
 
 	/* Invalid device id to start with */
-	intf->device_id = GB_DEVICE_ID_BAD;
+	intf->device_id = GB_INTERFACE_DEVICE_ID_BAD;
 
 	intf->dev.parent = &hd->dev;
 	intf->dev.bus = &greybus_bus_type;
@@ -137,6 +361,26 @@ struct gb_interface *gb_interface_create(struct gb_host_device *hd,
 	return intf;
 }
 
+int gb_interface_activate(struct gb_interface *intf)
+{
+	int ret;
+
+	ret = gb_interface_read_dme(intf);
+	if (ret)
+		return ret;
+
+	ret = gb_interface_route_create(intf);
+	if (ret)
+		return ret;
+
+	return 0;
+}
+
+void gb_interface_deactivate(struct gb_interface *intf)
+{
+	gb_interface_route_destroy(intf);
+}
+
 /*
  * Enable an interface by enabling its control connection and fetching the
  * manifest and other information over it.
@@ -146,6 +390,12 @@ int gb_interface_enable(struct gb_interface *intf)
 	struct gb_bundle *bundle, *tmp;
 	int ret, size;
 	void *manifest;
+
+	ret = gb_interface_read_and_clear_init_status(intf);
+	if (ret) {
+		dev_err(&intf->dev, "failed to clear init status: %d\n", ret);
+		return ret;
+	}
 
 	/* Establish control connection */
 	ret = gb_control_enable(intf->control);

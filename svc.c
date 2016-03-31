@@ -108,7 +108,7 @@ static struct attribute *svc_attrs[] = {
 };
 ATTRIBUTE_GROUPS(svc);
 
-static int gb_svc_intf_device_id(struct gb_svc *svc, u8 intf_id, u8 device_id)
+int gb_svc_intf_device_id(struct gb_svc *svc, u8 intf_id, u8 device_id)
 {
 	struct gb_svc_intf_device_id_request request;
 
@@ -118,17 +118,6 @@ static int gb_svc_intf_device_id(struct gb_svc *svc, u8 intf_id, u8 device_id)
 	return gb_operation_sync(svc->connection, GB_SVC_TYPE_INTF_DEVICE_ID,
 				 &request, sizeof(request), NULL, 0);
 }
-
-int gb_svc_intf_reset(struct gb_svc *svc, u8 intf_id)
-{
-	struct gb_svc_intf_reset_request request;
-
-	request.intf_id = intf_id;
-
-	return gb_operation_sync(svc->connection, GB_SVC_TYPE_INTF_RESET,
-				 &request, sizeof(request), NULL, 0);
-}
-EXPORT_SYMBOL_GPL(gb_svc_intf_reset);
 
 int gb_svc_intf_eject(struct gb_svc *svc, u8 intf_id)
 {
@@ -221,69 +210,6 @@ int gb_svc_dme_peer_set(struct gb_svc *svc, u8 intf_id, u16 attr, u16 selector,
 }
 EXPORT_SYMBOL_GPL(gb_svc_dme_peer_set);
 
-/*
- * T_TstSrcIncrement is written by the module on ES2 as a stand-in for boot
- * status attribute ES3_INIT_STATUS. AP needs to read and clear it, after
- * reading a non-zero value from it.
- *
- * FIXME: This is module-hardware dependent and needs to be extended for every
- * type of module we want to support.
- */
-static int gb_svc_read_and_clear_module_boot_status(struct gb_interface *intf)
-{
-	struct gb_host_device *hd = intf->hd;
-	int ret;
-	u32 value;
-	u16 attr;
-	u8 init_status;
-
-	/*
-	 * Check if the module is ES2 or ES3, and choose attr number
-	 * appropriately.
-	 * FIXME: Remove ES2 support from the kernel entirely.
-	 */
-	if (intf->ddbl1_manufacturer_id == ES2_DDBL1_MFR_ID &&
-				intf->ddbl1_product_id == ES2_DDBL1_PROD_ID)
-		attr = DME_ATTR_T_TST_SRC_INCREMENT;
-	else
-		attr = DME_ATTR_ES3_INIT_STATUS;
-
-	/* Read and clear boot status in ES3_INIT_STATUS */
-	ret = gb_svc_dme_peer_get(hd->svc, intf->interface_id, attr,
-				  DME_ATTR_SELECTOR_INDEX, &value);
-
-	if (ret)
-		return ret;
-
-	/*
-	 * A nonzero boot status indicates the module has finished
-	 * booting. Clear it.
-	 */
-	if (!value) {
-		dev_err(&intf->dev, "Module not ready yet\n");
-		return -ENODEV;
-	}
-
-	/*
-	 * Check if the module needs to boot from UniPro.
-	 * For ES2: We need to check lowest 8 bits of 'value'.
-	 * For ES3: We need to check highest 8 bits out of 32 of 'value'.
-	 * FIXME: Remove ES2 support from the kernel entirely.
-	 */
-	if (intf->ddbl1_manufacturer_id == ES2_DDBL1_MFR_ID &&
-				intf->ddbl1_product_id == ES2_DDBL1_PROD_ID)
-		init_status = value;
-	else
-		init_status = value >> 24;
-
-	if (init_status == DME_DIS_UNIPRO_BOOT_STARTED ||
-				init_status == DME_DIS_FALLBACK_UNIPRO_BOOT_STARTED)
-		intf->boot_over_unipro = true;
-
-	return gb_svc_dme_peer_set(hd->svc, intf->interface_id, attr,
-				   DME_ATTR_SELECTOR_INDEX, 0);
-}
-
 int gb_svc_connection_create(struct gb_svc *svc,
 				u8 intf1_id, u16 cport1_id,
 				u8 intf2_id, u16 cport2_id,
@@ -325,7 +251,7 @@ void gb_svc_connection_destroy(struct gb_svc *svc, u8 intf1_id, u16 cport1_id,
 EXPORT_SYMBOL_GPL(gb_svc_connection_destroy);
 
 /* Creates bi-directional routes between the devices */
-static int gb_svc_route_create(struct gb_svc *svc, u8 intf1_id, u8 dev1_id,
+int gb_svc_route_create(struct gb_svc *svc, u8 intf1_id, u8 dev1_id,
 			       u8 intf2_id, u8 dev2_id)
 {
 	struct gb_svc_route_create_request request;
@@ -340,7 +266,7 @@ static int gb_svc_route_create(struct gb_svc *svc, u8 intf1_id, u8 dev1_id,
 }
 
 /* Destroys bi-directional routes between the devices */
-static void gb_svc_route_destroy(struct gb_svc *svc, u8 intf1_id, u8 intf2_id)
+void gb_svc_route_destroy(struct gb_svc *svc, u8 intf1_id, u8 intf2_id)
 {
 	struct gb_svc_route_destroy_request request;
 	int ret;
@@ -471,78 +397,12 @@ static int gb_svc_hello(struct gb_operation *op)
 	return 0;
 }
 
-static int gb_svc_interface_route_create(struct gb_svc *svc,
-						struct gb_interface *intf)
-{
-	u8 intf_id = intf->interface_id;
-	u8 device_id;
-	int ret;
-
-	/*
-	 * Create a device id for the interface:
-	 * - device id 0 (GB_DEVICE_ID_SVC) belongs to the SVC
-	 * - device id 1 (GB_DEVICE_ID_AP) belongs to the AP
-	 *
-	 * XXX Do we need to allocate device ID for SVC or the AP here? And what
-	 * XXX about an AP with multiple interface blocks?
-	 */
-	ret = ida_simple_get(&svc->device_id_map,
-			     GB_DEVICE_ID_MODULES_START, 0, GFP_KERNEL);
-	if (ret < 0) {
-		dev_err(&svc->dev, "failed to allocate device id for interface %u: %d\n",
-				intf_id, ret);
-		return ret;
-	}
-	device_id = ret;
-
-	ret = gb_svc_intf_device_id(svc, intf_id, device_id);
-	if (ret) {
-		dev_err(&svc->dev, "failed to set device id %u for interface %u: %d\n",
-				device_id, intf_id, ret);
-		goto err_ida_remove;
-	}
-
-	/* Create a two-way route between the AP and the new interface. */
-	ret = gb_svc_route_create(svc, svc->ap_intf_id, GB_DEVICE_ID_AP,
-				  intf_id, device_id);
-	if (ret) {
-		dev_err(&svc->dev, "failed to create route to interface %u (device id %u): %d\n",
-				intf_id, device_id, ret);
-		goto err_svc_id_free;
-	}
-
-	intf->device_id = device_id;
-
-	return 0;
-
-err_svc_id_free:
-	/*
-	 * XXX Should we tell SVC that this id doesn't belong to interface
-	 * XXX anymore.
-	 */
-err_ida_remove:
-	ida_simple_remove(&svc->device_id_map, device_id);
-
-	return ret;
-}
-
-static void gb_svc_interface_route_destroy(struct gb_svc *svc,
-						struct gb_interface *intf)
-{
-	if (intf->device_id == GB_DEVICE_ID_BAD)
-		return;
-
-	gb_svc_route_destroy(svc, svc->ap_intf_id, intf->interface_id);
-	ida_simple_remove(&svc->device_id_map, intf->device_id);
-	intf->device_id = GB_DEVICE_ID_BAD;
-}
-
 static void gb_svc_intf_remove(struct gb_svc *svc, struct gb_interface *intf)
 {
 	intf->disconnected = true;
 
 	gb_interface_disable(intf);
-	gb_svc_interface_route_destroy(svc, intf);
+	gb_interface_deactivate(intf);
 	gb_interface_remove(intf);
 }
 
@@ -566,11 +426,7 @@ static void gb_svc_process_intf_hotplug(struct gb_operation *operation)
 
 	intf = gb_interface_find(hd, intf_id);
 	if (intf) {
-		/*
-		 * For ES2, we need to maintain the same vendor/product ids we
-		 * got from bootrom, otherwise userspace can't distinguish
-		 * between modules.
-		 */
+		/* HACK: Save Ara VID/PID for ES2 hack below */
 		vendor_id = intf->vendor_id;
 		product_id = intf->product_id;
 
@@ -600,45 +456,37 @@ static void gb_svc_process_intf_hotplug(struct gb_operation *operation)
 		return;
 	}
 
-	intf->ddbl1_manufacturer_id = le32_to_cpu(request->data.ddbl1_mfr_id);
-	intf->ddbl1_product_id = le32_to_cpu(request->data.ddbl1_prod_id);
-	intf->vendor_id = le32_to_cpu(request->data.ara_vend_id);
-	intf->product_id = le32_to_cpu(request->data.ara_prod_id);
-	intf->serial_number = le64_to_cpu(request->data.serial_number);
+	ret = gb_interface_activate(intf);
+	if (ret) {
+		dev_err(&svc->dev, "failed to activate interface %u: %d\n",
+				intf_id, ret);
+		goto err_interface_add;
+	}
 
 	/*
-	 * Use VID/PID specified at hotplug if:
-	 * - Bridge ASIC chip isn't ES2
-	 * - Received non-zero Vendor/Product ids
+	 * HACK: Use Ara VID/PID from earlier boot stage.
 	 *
-	 * Otherwise, use the ids we received from bootrom.
+	 * FIXME: remove quirk with ES2 support
 	 */
-	if (intf->ddbl1_manufacturer_id == ES2_DDBL1_MFR_ID &&
-	    intf->ddbl1_product_id == ES2_DDBL1_PROD_ID &&
-	    intf->vendor_id == 0 && intf->product_id == 0) {
+	if (intf->quirks & GB_INTERFACE_QUIRK_NO_ARA_IDS) {
 		intf->vendor_id = vendor_id;
 		intf->product_id = product_id;
 	}
-
-	ret = gb_svc_read_and_clear_module_boot_status(intf);
-	if (ret) {
-		dev_err(&svc->dev, "failed to clear boot status of interface %u: %d\n",
-				intf_id, ret);
-		goto out_interface_add;
-	}
-
-	ret = gb_svc_interface_route_create(svc, intf);
-	if (ret)
-		goto out_interface_add;
 
 	ret = gb_interface_enable(intf);
 	if (ret) {
 		dev_err(&svc->dev, "failed to enable interface %u: %d\n",
 				intf_id, ret);
-		goto out_interface_add;
+		goto err_interface_deactivate;
 	}
 
-out_interface_add:
+	gb_interface_add(intf);
+
+	return;
+
+err_interface_deactivate:
+	gb_interface_deactivate(intf);
+err_interface_add:
 	gb_interface_add(intf);
 }
 

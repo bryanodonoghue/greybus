@@ -10,6 +10,11 @@
 #ifndef __INTERFACE_H
 #define __INTERFACE_H
 
+#define GB_INTERFACE_QUIRK_NO_CPORT_FEATURES		BIT(0)
+#define GB_INTERFACE_QUIRK_NO_INTERFACE_VERSION		BIT(1)
+#define GB_INTERFACE_QUIRK_NO_INIT_STATUS		BIT(2)
+#define GB_INTERFACE_QUIRK_NO_ARA_IDS			BIT(3)
+
 struct gb_interface {
 	struct device dev;
 	struct gb_control *control;
@@ -18,13 +23,12 @@ struct gb_interface {
 	struct list_head links;	/* gb_host_device->interfaces */
 	struct list_head manifest_descs;
 	u8 interface_id;	/* Physical location within the Endo */
-	u8 device_id;		/* Device id allocated for the interface block by the SVC */
+	u8 device_id;
 
 	/* Information taken from the manifest descriptor */
 	char *vendor_string;
 	char *product_string;
 
-	/* Information taken from the hotplug event */
 	u32 ddbl1_manufacturer_id;
 	u32 ddbl1_product_id;
 	u32 vendor_id;
@@ -36,8 +40,8 @@ struct gb_interface {
 
 	struct gb_host_device *hd;
 
-	/* The interface needs to boot over unipro */
-	bool boot_over_unipro;
+	unsigned long quirks;
+
 	bool disconnected;
 };
 #define to_gb_interface(d) container_of(d, struct gb_interface, dev)
@@ -47,6 +51,8 @@ struct gb_interface *gb_interface_find(struct gb_host_device *hd,
 
 struct gb_interface *gb_interface_create(struct gb_host_device *hd,
 					 u8 interface_id);
+int gb_interface_activate(struct gb_interface *intf);
+void gb_interface_deactivate(struct gb_interface *intf);
 int gb_interface_enable(struct gb_interface *intf);
 void gb_interface_disable(struct gb_interface *intf);
 int gb_interface_add(struct gb_interface *intf);

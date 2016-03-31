@@ -54,16 +54,12 @@
 
 /* Fixed IDs for control/svc protocols */
 
-/* Device ID of SVC and AP */
-#define GB_DEVICE_ID_SVC			0
-#define GB_DEVICE_ID_AP				1
-#define GB_DEVICE_ID_MODULES_START		2
+/* SVC switch-port device ids */
+#define GB_SVC_DEVICE_ID_SVC			0
+#define GB_SVC_DEVICE_ID_AP			1
+#define GB_SVC_DEVICE_ID_MIN			2
+#define GB_SVC_DEVICE_ID_MAX			31
 
-/*
- * Bundle/cport for control/svc cport: The same bundle/cport is shared by both
- * CONTROL and SVC protocols for communication between AP and SVC.
- */
-#define GB_SVC_BUNDLE_ID			0
 #define GB_SVC_CPORT_ID				0
 #define GB_CONTROL_BUNDLE_ID			0
 #define GB_CONTROL_CPORT_ID			0
@@ -229,10 +225,6 @@ struct gb_control_timesync_authoritative_request {
 #define GB_FIRMWARE_TYPE_READY_TO_BOOT		0x04
 #define GB_FIRMWARE_TYPE_AP_READY		0x05	/* Request with no-payload */
 #define GB_FIRMWARE_TYPE_GET_VID_PID		0x06	/* Request with no-payload */
-
-/* FIXME: remove all ES2-specific identifiers from the kernel */
-#define ES2_DDBL1_MFR_ID	0x00000126
-#define ES2_DDBL1_PROD_ID	0x00001000
 
 /* Greybus firmware boot stages */
 #define GB_FIRMWARE_BOOT_STAGE_ONE		0x01 /* Reserved for the boot ROM */
@@ -892,18 +884,12 @@ struct gb_svc_dme_peer_set_response {
 	__le16	result_code;
 } __packed;
 
-/* Attributes for peer get/set operations */
-#define DME_ATTR_SELECTOR_INDEX		0
-/* FIXME: remove ES2 support and DME_ATTR_T_TST_SRC_INCREMENT */
-#define DME_ATTR_T_TST_SRC_INCREMENT	0x4083
-#define DME_ATTR_ES3_INIT_STATUS		0x6101
-
-/* Return value from init-status attributes listed above */
-#define DME_DIS_SPI_BOOT_STARTED		0x02
-#define DME_DIS_TRUSTED_SPI_BOOT_FINISHED	0x03
-#define DME_DIS_UNTRUSTED_SPI_BOOT_FINISHED	0x04
-#define DME_DIS_UNIPRO_BOOT_STARTED		0x06
-#define DME_DIS_FALLBACK_UNIPRO_BOOT_STARTED	0x09
+/* Greybus init-status values, currently retrieved using DME peer gets. */
+#define GB_INIT_SPI_BOOT_STARTED			0x02
+#define GB_INIT_TRUSTED_SPI_BOOT_FINISHED		0x03
+#define GB_INIT_UNTRUSTED_SPI_BOOT_FINISHED		0x04
+#define GB_INIT_BOOTROM_UNIPRO_BOOT_STARTED		0x06
+#define GB_INIT_BOOTROM_FALLBACK_UNIPRO_BOOT_STARTED	0x09
 
 struct gb_svc_route_create_request {
 	__u8	intf1_id;
