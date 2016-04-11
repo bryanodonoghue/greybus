@@ -91,6 +91,10 @@ static const struct gb_camera_fmt_map mbus_to_gbus_format[] = {
 	{
 		.mbus_code = V4L2_MBUS_FMT_JPEG_1X8,
 		.gb_format = 0x40,
+	},
+	{
+		.mbus_code = V4L2_MBUS_FMT_ARA_METADATA_1X8,
+		.gb_format = 0x41,
 	}
 };
 
@@ -498,23 +502,30 @@ static int gb_camera_op_capture(void *priv, u32 request_id,
 		unsigned int streams, unsigned int num_frames,
 		size_t settings_size, const void *settings)
 {
-	return gb_camera_capture(priv, request_id, streams, num_frames,
+	struct gb_camera *gcam = priv;
+
+	return gb_camera_capture(gcam, request_id, streams, num_frames,
 				 settings_size, settings);
 }
 
 static int gb_camera_op_flush(void *priv, u32 *request_id)
 {
-	return gb_camera_flush(priv, request_id);
+	struct gb_camera *gcam = priv;
+
+	return gb_camera_flush(gcam, request_id);
 }
+
+static const struct gb_camera_ops gb_cam_ops = {
+	.capabilities = gb_camera_op_capabilities,
+	.configure_streams = gb_camera_op_configure_streams,
+	.capture = gb_camera_op_capture,
+	.flush = gb_camera_op_flush,
+};
 
 static int gb_camera_register_intf_ops(struct gb_camera *gcam)
 {
 	gcam->module.priv = gcam;
-	gcam->module.ops.capabilities = gb_camera_op_capabilities;
-	gcam->module.ops.configure_streams = gb_camera_op_configure_streams;
-	gcam->module.ops.capture = gb_camera_op_capture;
-	gcam->module.ops.flush = gb_camera_op_flush;
-
+	gcam->module.ops = &gb_cam_ops;
 	return gb_camera_register(&gcam->module);
 }
 
