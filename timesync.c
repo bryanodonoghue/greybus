@@ -8,6 +8,7 @@
  */
 #include <linux/debugfs.h>
 #include "greybus.h"
+#include "greybus_trace.h"
 #include "timesync_platform.h"
 
 /*
@@ -778,24 +779,30 @@ void gb_timesync_irq(void)
 {
 	unsigned long flags;
 	u64 strobe_time;
+	bool strobe_is_ping = true;
 
 	strobe_time = gb_timesync_get_frame_time_raw();
 
 	spin_lock_irqsave(&gb_timesync_spinlock, flags);
 
 	if (gb_timesync_state == GB_TIMESYNC_STATE_PING) {
-		if (gb_timesync_capture_ping)
-			gb_timesync_ap_ping_frame_time = strobe_time;
-		goto done;
+		if (!gb_timesync_capture_ping)
+			goto done_nolog;
+		gb_timesync_ap_ping_frame_time = strobe_time;
+		goto done_log;
 	} else if (gb_timesync_state != GB_TIMESYNC_STATE_WAIT_SVC) {
-		goto done;
+		goto done_nolog;
 	}
 
 	gb_timesync_strobe_time[gb_timesync_strobe] = strobe_time;
 
 	if (++gb_timesync_strobe == gb_timesync_strobe_count)
 		gb_timesync_set_state(GB_TIMESYNC_STATE_AUTHORITATIVE);
-done:
+	strobe_is_ping = false;
+done_log:
+	trace_gb_timesync_irq(strobe_is_ping, gb_timesync_strobe,
+			      gb_timesync_strobe_count, strobe_time);
+done_nolog:
 	spin_unlock_irqrestore(&gb_timesync_spinlock, flags);
 }
 EXPORT_SYMBOL(gb_timesync_irq);
