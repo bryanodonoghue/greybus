@@ -160,6 +160,36 @@ DEFINE_EVENT(gb_host_device, gb_host_device_recv,
 	TP_ARGS(hd, intf_cport_id, payload_size)
 );
 
+/*
+ * tracepoint name	greybus:gb_timesync_irq
+ * description		tracepoint representing a TimeSync strobe event
+ * location		timesync.c:gb_timesync_irq
+ */
+TRACE_EVENT(gb_timesync_irq,
+
+	TP_PROTO(bool ping, u8 strobe, u8 count, u64 frame_time),
+
+	TP_ARGS(ping, strobe, count, frame_time),
+
+	TP_STRUCT__entry(
+		__field(bool, ping)
+		__field(u8, strobe)
+		__field(u8, count)
+		__field(u64, frame_time)
+	),
+
+	TP_fast_assign(
+		__entry->ping = ping;
+		__entry->strobe = strobe;
+		__entry->count = count;
+		__entry->frame_time = frame_time;
+	),
+
+	TP_printk("%s %d/%d frame-time %llu\n",
+		  __entry->ping ? "ping" : "strobe", __entry->strobe,
+		  __entry->count, __entry->frame_time)
+);
+
 #endif /* _TRACE_GREYBUS_H */
 
 /* This part must be outside protection */
