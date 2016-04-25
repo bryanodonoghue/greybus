@@ -249,8 +249,6 @@ gb_interface_attr(ddbl1_product_id, "0x%08x");
 gb_interface_attr(interface_id, "%u");
 gb_interface_attr(vendor_id, "0x%08x");
 gb_interface_attr(product_id, "0x%08x");
-gb_interface_attr(vendor_string, "%s");
-gb_interface_attr(product_string, "%s");
 gb_interface_attr(serial_number, "0x%016llx");
 
 static ssize_t version_show(struct device *dev, struct device_attribute *attr,
@@ -326,8 +324,6 @@ static struct attribute *interface_attrs[] = {
 	&dev_attr_interface_id.attr,
 	&dev_attr_vendor_id.attr,
 	&dev_attr_product_id.attr,
-	&dev_attr_vendor_string.attr,
-	&dev_attr_product_string.attr,
 	&dev_attr_serial_number.attr,
 	&dev_attr_version.attr,
 	&dev_attr_voltage_now.attr,
@@ -355,12 +351,6 @@ struct gb_interface *gb_interface_find(struct gb_host_device *hd,
 static void gb_interface_release(struct device *dev)
 {
 	struct gb_interface *intf = to_gb_interface(dev);
-
-	kfree(intf->product_string);
-	kfree(intf->vendor_string);
-
-	if (intf->control)
-		gb_control_destroy(intf->control);
 
 	kfree(intf);
 }
@@ -410,12 +400,6 @@ struct gb_interface *gb_interface_create(struct gb_host_device *hd,
 	device_initialize(&intf->dev);
 	dev_set_name(&intf->dev, "%d-%d", hd->bus_id, interface_id);
 
-	intf->control = gb_control_create(intf);
-	if (!intf->control) {
-		put_device(&intf->dev);
-		return NULL;
-	}
-
 	list_add(&intf->links, &hd->interfaces);
 
 	return intf;
@@ -442,11 +426,13 @@ void gb_interface_deactivate(struct gb_interface *intf)
 }
 
 /*
- * Enable an interface by enabling its control connection and fetching the
- * manifest and other information over it.
+ * Enable an interface by enabling its control connection, fetching the
+ * manifest and other information over it, and finally registering its child
+ * devices.
  */
 int gb_interface_enable(struct gb_interface *intf)
 {
+	struct gb_control *control;
 	struct gb_bundle *bundle, *tmp;
 	int ret, size;
 	void *manifest;
@@ -458,9 +444,17 @@ int gb_interface_enable(struct gb_interface *intf)
 	}
 
 	/* Establish control connection */
+	control = gb_control_create(intf);
+	if (IS_ERR(control)) {
+		dev_err(&intf->dev, "failed to create control device: %lu\n",
+				PTR_ERR(control));
+		return PTR_ERR(control);
+	}
+	intf->control = control;
+
 	ret = gb_control_enable(intf->control);
 	if (ret)
-		return ret;
+		goto err_put_control;
 
 	/* Get manifest size using control protocol on CPort */
 	size = gb_control_get_manifest_size_operation(intf);
@@ -506,7 +500,22 @@ int gb_interface_enable(struct gb_interface *intf)
 	if (ret)
 		goto err_destroy_bundles;
 
+	/* Register the control device and any bundles */
+	ret = gb_control_add(intf->control);
+	if (ret)
+		goto err_destroy_bundles;
+
+	list_for_each_entry_safe_reverse(bundle, tmp, &intf->bundles, links) {
+		ret = gb_bundle_add(bundle);
+		if (ret) {
+			gb_bundle_destroy(bundle);
+			continue;
+		}
+	}
+
 	kfree(manifest);
+
+	intf->enabled = true;
 
 	return 0;
 
@@ -517,6 +526,9 @@ err_free_manifest:
 	kfree(manifest);
 err_disable_control:
 	gb_control_disable(intf->control);
+err_put_control:
+	gb_control_put(intf->control);
+	intf->control = NULL;
 
 	return ret;
 }
@@ -526,6 +538,9 @@ void gb_interface_disable(struct gb_interface *intf)
 {
 	struct gb_bundle *bundle;
 	struct gb_bundle *next;
+
+	if (!intf->enabled)
+		return;
 
 	/*
 	 * Disable the control-connection early to avoid operation timeouts
@@ -537,13 +552,17 @@ void gb_interface_disable(struct gb_interface *intf)
 	list_for_each_entry_safe(bundle, next, &intf->bundles, links)
 		gb_bundle_destroy(bundle);
 
+	gb_control_del(intf->control);
 	gb_control_disable(intf->control);
+	gb_control_put(intf->control);
+	intf->control = NULL;
+
+	intf->enabled = false;
 }
 
-/* Register an interface and its bundles. */
+/* Register an interface. */
 int gb_interface_add(struct gb_interface *intf)
 {
-	struct gb_bundle *bundle, *tmp;
 	int ret;
 
 	ret = device_add(&intf->dev);
@@ -556,14 +575,6 @@ int gb_interface_add(struct gb_interface *intf)
 		 intf->vendor_id, intf->product_id);
 	dev_info(&intf->dev, "DDBL1 Manufacturer=0x%08x, Product=0x%08x\n",
 		 intf->ddbl1_manufacturer_id, intf->ddbl1_product_id);
-
-	list_for_each_entry_safe_reverse(bundle, tmp, &intf->bundles, links) {
-		ret = gb_bundle_add(bundle);
-		if (ret) {
-			gb_bundle_destroy(bundle);
-			continue;
-		}
-	}
 
 	return 0;
 }

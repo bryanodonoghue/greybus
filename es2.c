@@ -690,19 +690,6 @@ static void es2_destroy(struct es2_ap_dev *es2)
 	usb_put_dev(udev);
 }
 
-static void ap_disconnect(struct usb_interface *interface)
-{
-	struct es2_ap_dev *es2 = usb_get_intfdata(interface);
-	int i;
-
-	for (i = 0; i < NUM_BULKS; ++i)
-		es2_cport_in_disable(es2, &es2->cport_in[i]);
-
-	gb_hd_del(es2->hd);
-
-	es2_destroy(es2);
-}
-
 static void cport_in_callback(struct urb *urb)
 {
 	struct gb_host_device *hd = urb->context;
@@ -715,6 +702,11 @@ static void cport_in_callback(struct urb *urb)
 	if (status) {
 		if ((status == -EAGAIN) || (status == -EPROTO))
 			goto exit;
+
+		/* The urb is being unlinked */
+		if (status == -ENOENT || status == -ESHUTDOWN)
+			return;
+
 		dev_err(dev, "urb cport in error %d (dropped)\n", status);
 		return;
 	}
@@ -842,7 +834,7 @@ static void usb_log_enable(struct es2_ap_dev *es2)
 		return;
 	/* XXX We will need to rename this per APB */
 	es2->apb_log_dentry = debugfs_create_file("apb_log", S_IRUGO,
-						gb_debugfs_get(), NULL,
+						gb_debugfs_get(), es2,
 						&apb_log_fops);
 }
 
@@ -1078,11 +1070,25 @@ error:
 	return retval;
 }
 
+static void ap_disconnect(struct usb_interface *interface)
+{
+	struct es2_ap_dev *es2 = usb_get_intfdata(interface);
+	int i;
+
+	gb_hd_del(es2->hd);
+
+	for (i = 0; i < NUM_BULKS; ++i)
+		es2_cport_in_disable(es2, &es2->cport_in[i]);
+
+	es2_destroy(es2);
+}
+
 static struct usb_driver es2_ap_driver = {
 	.name =		"es2_ap_driver",
 	.probe =	ap_probe,
 	.disconnect =	ap_disconnect,
 	.id_table =	id_table,
+	.soft_unbind =	1,
 };
 
 module_usb_driver(es2_ap_driver);

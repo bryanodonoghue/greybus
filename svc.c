@@ -7,6 +7,7 @@
  * Released under the GPLv2 only.
  */
 
+#include <linux/debugfs.h>
 #include <linux/input.h>
 #include <linux/workqueue.h>
 
@@ -99,6 +100,78 @@ static ssize_t watchdog_store(struct device *dev,
 }
 static DEVICE_ATTR_RW(watchdog);
 
+static int gb_svc_pwrmon_rail_count_get(struct gb_svc *svc, u8 *value)
+{
+	struct gb_svc_pwrmon_rail_count_get_response response;
+	int ret;
+
+	ret = gb_operation_sync(svc->connection,
+				GB_SVC_TYPE_PWRMON_RAIL_COUNT_GET, NULL, 0,
+				&response, sizeof(response));
+	if (ret) {
+		dev_err(&svc->dev, "failed to get rail count: %d\n", ret);
+		return ret;
+	}
+
+	*value = response.rail_count;
+
+	return 0;
+}
+
+static int gb_svc_pwrmon_rail_names_get(struct gb_svc *svc,
+		struct gb_svc_pwrmon_rail_names_get_response *response,
+		size_t bufsize)
+{
+	int ret;
+
+	ret = gb_operation_sync(svc->connection,
+				GB_SVC_TYPE_PWRMON_RAIL_NAMES_GET, NULL, 0,
+				response, bufsize);
+	if (ret) {
+		dev_err(&svc->dev, "failed to get rail names: %d\n", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+static int gb_svc_pwrmon_sample_get(struct gb_svc *svc, u8 rail_id,
+				    u8 measurement_type, u32 *value)
+{
+	struct gb_svc_pwrmon_sample_get_request request;
+	struct gb_svc_pwrmon_sample_get_response response;
+	int ret;
+
+	request.rail_id = rail_id;
+	request.measurement_type = measurement_type;
+
+	ret = gb_operation_sync(svc->connection, GB_SVC_TYPE_PWRMON_SAMPLE_GET,
+				&request, sizeof(request),
+				&response, sizeof(response));
+	if (ret) {
+		dev_err(&svc->dev, "failed to get rail sample: %d\n", ret);
+		return ret;
+	}
+
+	if (response.result) {
+		dev_err(&svc->dev,
+			"UniPro error while getting rail power sample (%d %d): %d\n",
+			rail_id, measurement_type, response.result);
+		switch (response.result) {
+		case GB_SVC_PWRMON_GET_SAMPLE_INVAL:
+			return -EINVAL;
+		case GB_SVC_PWRMON_GET_SAMPLE_NOSUPP:
+			return -ENOMSG;
+		default:
+			return -EIO;
+		}
+	}
+
+	*value = le32_to_cpu(response.measurement);
+
+	return 0;
+}
+
 int gb_svc_pwrmon_intf_sample_get(struct gb_svc *svc, u8 intf_id,
 				  u8 measurement_type, u32 *value)
 {
@@ -114,7 +187,7 @@ int gb_svc_pwrmon_intf_sample_get(struct gb_svc *svc, u8 intf_id,
 				&request, sizeof(request),
 				&response, sizeof(response));
 	if (ret) {
-		dev_err(&svc->dev, "failed to get intf sample (%d)\n", ret);
+		dev_err(&svc->dev, "failed to get intf sample: %d\n", ret);
 		return ret;
 	}
 
@@ -393,6 +466,161 @@ static int gb_svc_version_request(struct gb_operation *op)
 	return 0;
 }
 
+static ssize_t pwr_debugfs_voltage_read(struct file *file, char __user *buf,
+					size_t len, loff_t *offset)
+{
+	struct svc_debugfs_pwrmon_rail *pwrmon_rails = file->f_inode->i_private;
+	struct gb_svc *svc = pwrmon_rails->svc;
+	int ret, desc;
+	u32 value;
+	char buff[16];
+
+	ret = gb_svc_pwrmon_sample_get(svc, pwrmon_rails->id,
+				       GB_SVC_PWRMON_TYPE_VOL, &value);
+	if (ret) {
+		dev_err(&svc->dev,
+			"failed to get voltage sample %u: %d\n",
+			pwrmon_rails->id, ret);
+		return ret;
+	}
+
+	desc = scnprintf(buff, sizeof(buff), "%u\n", value);
+
+	return simple_read_from_buffer(buf, len, offset, buff, desc);
+}
+
+static ssize_t pwr_debugfs_current_read(struct file *file, char __user *buf,
+					size_t len, loff_t *offset)
+{
+	struct svc_debugfs_pwrmon_rail *pwrmon_rails = file->f_inode->i_private;
+	struct gb_svc *svc = pwrmon_rails->svc;
+	int ret, desc;
+	u32 value;
+	char buff[16];
+
+	ret = gb_svc_pwrmon_sample_get(svc, pwrmon_rails->id,
+				       GB_SVC_PWRMON_TYPE_CURR, &value);
+	if (ret) {
+		dev_err(&svc->dev,
+			"failed to get current sample %u: %d\n",
+			pwrmon_rails->id, ret);
+		return ret;
+	}
+
+	desc = scnprintf(buff, sizeof(buff), "%u\n", value);
+
+	return simple_read_from_buffer(buf, len, offset, buff, desc);
+}
+
+static ssize_t pwr_debugfs_power_read(struct file *file, char __user *buf,
+				      size_t len, loff_t *offset)
+{
+	struct svc_debugfs_pwrmon_rail *pwrmon_rails = file->f_inode->i_private;
+	struct gb_svc *svc = pwrmon_rails->svc;
+	int ret, desc;
+	u32 value;
+	char buff[16];
+
+	ret = gb_svc_pwrmon_sample_get(svc, pwrmon_rails->id,
+				       GB_SVC_PWRMON_TYPE_PWR, &value);
+	if (ret) {
+		dev_err(&svc->dev, "failed to get power sample %u: %d\n",
+			pwrmon_rails->id, ret);
+		return ret;
+	}
+
+	desc = scnprintf(buff, sizeof(buff), "%u\n", value);
+
+	return simple_read_from_buffer(buf, len, offset, buff, desc);
+}
+
+static const struct file_operations pwrmon_debugfs_voltage_fops = {
+	.read		= pwr_debugfs_voltage_read,
+};
+
+static const struct file_operations pwrmon_debugfs_current_fops = {
+	.read		= pwr_debugfs_current_read,
+};
+
+static const struct file_operations pwrmon_debugfs_power_fops = {
+	.read		= pwr_debugfs_power_read,
+};
+
+static void svc_pwrmon_debugfs_init(struct gb_svc *svc)
+{
+	int i;
+	size_t bufsize;
+	struct dentry *dent;
+
+	dent = debugfs_create_dir("pwrmon", svc->debugfs_dentry);
+	if (IS_ERR_OR_NULL(dent))
+		return;
+
+	if (gb_svc_pwrmon_rail_count_get(svc, &svc->rail_count))
+		goto err_pwrmon_debugfs;
+
+	if (!svc->rail_count || svc->rail_count > GB_SVC_PWRMON_MAX_RAIL_COUNT)
+		goto err_pwrmon_debugfs;
+
+	bufsize = GB_SVC_PWRMON_RAIL_NAME_BUFSIZE * svc->rail_count;
+
+	svc->rail_names = kzalloc(bufsize, GFP_KERNEL);
+	if (!svc->rail_names)
+		goto err_pwrmon_debugfs;
+
+	svc->pwrmon_rails = kcalloc(svc->rail_count, sizeof(*svc->pwrmon_rails),
+				    GFP_KERNEL);
+	if (!svc->pwrmon_rails)
+		goto err_pwrmon_debugfs_free;
+
+	if (gb_svc_pwrmon_rail_names_get(svc, svc->rail_names, bufsize))
+		goto err_pwrmon_debugfs_free;
+
+	for (i = 0; i < svc->rail_count; i++) {
+		struct dentry *dir;
+		struct svc_debugfs_pwrmon_rail *rail = &svc->pwrmon_rails[i];
+		char fname[GB_SVC_PWRMON_RAIL_NAME_BUFSIZE];
+
+		snprintf(fname, sizeof(fname), "%s",
+			 (char *)&svc->rail_names->name[i]);
+
+		rail->id = i;
+		rail->svc = svc;
+
+		dir = debugfs_create_dir(fname, dent);
+		debugfs_create_file("voltage_now", S_IRUGO, dir, rail,
+				    &pwrmon_debugfs_voltage_fops);
+		debugfs_create_file("current_now", S_IRUGO, dir, rail,
+				    &pwrmon_debugfs_current_fops);
+		debugfs_create_file("power_now", S_IRUGO, dir, rail,
+				    &pwrmon_debugfs_power_fops);
+	};
+	return;
+
+err_pwrmon_debugfs_free:
+	kfree(svc->rail_names);
+	svc->rail_names = NULL;
+
+	kfree(svc->pwrmon_rails);
+	svc->pwrmon_rails = NULL;
+
+err_pwrmon_debugfs:
+	debugfs_remove(dent);
+}
+
+static void svc_debugfs_init(struct gb_svc *svc)
+{
+	svc->debugfs_dentry = debugfs_create_dir(dev_name(&svc->dev),
+						 gb_debugfs_get());
+	svc_pwrmon_debugfs_init(svc);
+}
+
+static void svc_debugfs_exit(struct gb_svc *svc)
+{
+	debugfs_remove_recursive(svc->debugfs_dentry);
+	kfree(svc->rail_names);
+}
+
 static int gb_svc_hello(struct gb_operation *op)
 {
 	struct gb_connection *connection = op->connection;
@@ -432,16 +660,9 @@ static int gb_svc_hello(struct gb_operation *op)
 		return ret;
 	}
 
+	svc_debugfs_init(svc);
+
 	return 0;
-}
-
-static void gb_svc_intf_remove(struct gb_svc *svc, struct gb_interface *intf)
-{
-	intf->disconnected = true;
-
-	gb_interface_disable(intf);
-	gb_interface_deactivate(intf);
-	gb_interface_remove(intf);
 }
 
 static void gb_svc_process_intf_hotplug(struct gb_operation *operation)
@@ -452,8 +673,6 @@ static void gb_svc_process_intf_hotplug(struct gb_operation *operation)
 	struct gb_host_device *hd = connection->hd;
 	struct gb_interface *intf;
 	u8 intf_id;
-	u32 vendor_id = 0;
-	u32 product_id = 0;
 	int ret;
 
 	/* The request message size has already been verified. */
@@ -464,27 +683,15 @@ static void gb_svc_process_intf_hotplug(struct gb_operation *operation)
 
 	intf = gb_interface_find(hd, intf_id);
 	if (intf) {
-		/* HACK: Save Ara VID/PID for ES2 hack below */
-		vendor_id = intf->vendor_id;
-		product_id = intf->product_id;
-
-		/*
-		 * We have received a hotplug request for an interface that
-		 * already exists.
-		 *
-		 * This can happen in cases like:
-		 * - bootrom loading the firmware image and booting into that,
-		 *   which only generates a hotplug event. i.e. no hot-unplug
-		 *   event.
-		 * - Or the firmware on the module crashed and sent hotplug
-		 *   request again to the SVC, which got propagated to AP.
-		 *
-		 * Remove the interface and add it again, and let user know
-		 * about this with a print message.
-		 */
-		dev_info(&svc->dev, "removing interface %u to add it again\n",
+		dev_info(&svc->dev, "mode switch detected on interface %u\n",
 				intf_id);
-		gb_svc_intf_remove(svc, intf);
+
+		/* Mark as disconnected to prevent I/O during disable. */
+		intf->disconnected = true;
+		gb_interface_disable(intf);
+		intf->disconnected = false;
+
+		goto enable_interface;
 	}
 
 	intf = gb_interface_create(hd, intf_id);
@@ -498,19 +705,15 @@ static void gb_svc_process_intf_hotplug(struct gb_operation *operation)
 	if (ret) {
 		dev_err(&svc->dev, "failed to activate interface %u: %d\n",
 				intf_id, ret);
-		goto err_interface_add;
+		gb_interface_add(intf);
+		return;
 	}
 
-	/*
-	 * HACK: Use Ara VID/PID from earlier boot stage.
-	 *
-	 * FIXME: remove quirk with ES2 support
-	 */
-	if (intf->quirks & GB_INTERFACE_QUIRK_NO_ARA_IDS) {
-		intf->vendor_id = vendor_id;
-		intf->product_id = product_id;
-	}
+	ret = gb_interface_add(intf);
+	if (ret)
+		goto err_interface_deactivate;
 
+enable_interface:
 	ret = gb_interface_enable(intf);
 	if (ret) {
 		dev_err(&svc->dev, "failed to enable interface %u: %d\n",
@@ -518,14 +721,10 @@ static void gb_svc_process_intf_hotplug(struct gb_operation *operation)
 		goto err_interface_deactivate;
 	}
 
-	gb_interface_add(intf);
-
 	return;
 
 err_interface_deactivate:
 	gb_interface_deactivate(intf);
-err_interface_add:
-	gb_interface_add(intf);
 }
 
 static void gb_svc_process_intf_hot_unplug(struct gb_operation *operation)
@@ -549,7 +748,12 @@ static void gb_svc_process_intf_hot_unplug(struct gb_operation *operation)
 		return;
 	}
 
-	gb_svc_intf_remove(svc, intf);
+	/* Mark as disconnected to prevent I/O during disable. */
+	intf->disconnected = true;
+
+	gb_interface_disable(intf);
+	gb_interface_deactivate(intf);
+	gb_interface_remove(intf);
 }
 
 static void gb_svc_process_deferred_request(struct work_struct *work)
@@ -894,6 +1098,7 @@ static void gb_svc_remove_interfaces(struct gb_svc *svc)
 
 	list_for_each_entry_safe(intf, tmp, &svc->hd->interfaces, links) {
 		gb_interface_disable(intf);
+		gb_interface_deactivate(intf);
 		gb_interface_remove(intf);
 	}
 }
@@ -907,6 +1112,7 @@ void gb_svc_del(struct gb_svc *svc)
 	 * from the request handler.
 	 */
 	if (device_is_registered(&svc->dev)) {
+		svc_debugfs_exit(svc);
 		gb_svc_watchdog_destroy(svc);
 		input_unregister_device(svc->input);
 		device_del(&svc->dev);
