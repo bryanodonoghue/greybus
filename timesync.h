@@ -24,6 +24,7 @@ int gb_timesync_init(void);
 void gb_timesync_exit(void);
 void gb_timesync_irq(void);
 u64 gb_timesync_get_frame_time(void);
+int gb_timesync_frame_time_to_timespec(u64 frame_time, struct timespec *ts);
 int gb_timesync_schedule_asynchronous(void);
 int gb_timesync_schedule_synchronous(void);
 
