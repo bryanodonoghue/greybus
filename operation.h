@@ -18,12 +18,6 @@ struct gb_operation;
 #define GB_OPERATION_TIMEOUT_DEFAULT	1000	/* milliseconds */
 
 /*
- * No protocol may define an operation that has numeric value 0x00.
- * It is reserved as an explicitly invalid value.
- */
-#define GB_OPERATION_TYPE_INVALID	((u8)0x00)
-
-/*
  * The top bit of the type in an operation message header indicates
  * whether the message is a request (bit clear) or response (bit set)
  */
@@ -67,7 +61,8 @@ struct gb_message {
 #define GB_OPERATION_FLAG_UNIDIRECTIONAL	BIT(1)
 #define GB_OPERATION_FLAG_SHORT_RESPONSE	BIT(2)
 
-#define GB_OPERATION_FLAG_USER_MASK	GB_OPERATION_FLAG_SHORT_RESPONSE
+#define GB_OPERATION_FLAG_USER_MASK	(GB_OPERATION_FLAG_SHORT_RESPONSE | \
+					 GB_OPERATION_FLAG_UNIDIRECTIONAL)
 
 /*
  * A Greybus operation is a remote procedure call performed over a
@@ -177,6 +172,9 @@ int gb_operation_sync_timeout(struct gb_connection *connection, int type,
 				void *request, int request_size,
 				void *response, int response_size,
 				unsigned int timeout);
+int gb_operation_unidirectional_timeout(struct gb_connection *connection,
+				int type, void *request, int request_size,
+				unsigned int timeout);
 
 static inline int gb_operation_sync(struct gb_connection *connection, int type,
 		      void *request, int request_size,
@@ -185,6 +183,13 @@ static inline int gb_operation_sync(struct gb_connection *connection, int type,
 	return gb_operation_sync_timeout(connection, type,
 			request, request_size, response, response_size,
 			GB_OPERATION_TIMEOUT_DEFAULT);
+}
+
+static inline int gb_operation_unidirectional(struct gb_connection *connection,
+				int type, void *request, int request_size)
+{
+	return gb_operation_unidirectional_timeout(connection, type,
+			request, request_size, GB_OPERATION_TIMEOUT_DEFAULT);
 }
 
 int gb_operation_init(void);

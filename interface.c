@@ -226,6 +226,9 @@ static int gb_interface_read_and_clear_init_status(struct gb_interface *intf)
 		intf->quirks |= GB_INTERFACE_QUIRK_NO_CPORT_FEATURES;
 		intf->quirks |= GB_INTERFACE_QUIRK_NO_INTERFACE_VERSION;
 		break;
+	default:
+		intf->quirks &= ~GB_INTERFACE_QUIRK_NO_CPORT_FEATURES;
+		intf->quirks &= ~GB_INTERFACE_QUIRK_NO_INTERFACE_VERSION;
 	}
 
 	/* Clear the init status. */
@@ -333,21 +336,6 @@ static struct attribute *interface_attrs[] = {
 };
 ATTRIBUTE_GROUPS(interface);
 
-
-// FIXME, odds are you don't want to call this function, rework the caller to
-// not need it please.
-struct gb_interface *gb_interface_find(struct gb_host_device *hd,
-				       u8 interface_id)
-{
-	struct gb_interface *intf;
-
-	list_for_each_entry(intf, &hd->interfaces, links)
-		if (intf->interface_id == interface_id)
-			return intf;
-
-	return NULL;
-}
-
 static void gb_interface_release(struct device *dev)
 {
 	struct gb_interface *intf = to_gb_interface(dev);
@@ -371,13 +359,11 @@ struct device_type greybus_interface_type = {
  *
  * Returns a pointer to the new interfce or a null pointer if a
  * failure occurs due to memory exhaustion.
- *
- * Locking: Caller ensures serialisation with gb_interface_remove and
- * gb_interface_find.
  */
-struct gb_interface *gb_interface_create(struct gb_host_device *hd,
+struct gb_interface *gb_interface_create(struct gb_module *module,
 					 u8 interface_id)
 {
+	struct gb_host_device *hd = module->hd;
 	struct gb_interface *intf;
 
 	intf = kzalloc(sizeof(*intf), GFP_KERNEL);
@@ -385,50 +371,193 @@ struct gb_interface *gb_interface_create(struct gb_host_device *hd,
 		return NULL;
 
 	intf->hd = hd;		/* XXX refcount? */
+	intf->module = module;
 	intf->interface_id = interface_id;
 	INIT_LIST_HEAD(&intf->bundles);
 	INIT_LIST_HEAD(&intf->manifest_descs);
+	mutex_init(&intf->mutex);
 
 	/* Invalid device id to start with */
 	intf->device_id = GB_INTERFACE_DEVICE_ID_BAD;
 
-	intf->dev.parent = &hd->dev;
+	intf->dev.parent = &module->dev;
 	intf->dev.bus = &greybus_bus_type;
 	intf->dev.type = &greybus_interface_type;
 	intf->dev.groups = interface_groups;
-	intf->dev.dma_mask = hd->dev.dma_mask;
+	intf->dev.dma_mask = module->dev.dma_mask;
 	device_initialize(&intf->dev);
-	dev_set_name(&intf->dev, "%d-%d", hd->bus_id, interface_id);
-
-	list_add(&intf->links, &hd->interfaces);
+	dev_set_name(&intf->dev, "%s.%u", dev_name(&module->dev),
+			interface_id);
 
 	return intf;
 }
 
-int gb_interface_activate(struct gb_interface *intf)
+static int gb_interface_vsys_set(struct gb_interface *intf, bool enable)
 {
+	struct gb_svc *svc = intf->hd->svc;
 	int ret;
 
-	ret = gb_interface_read_dme(intf);
-	if (ret)
-		return ret;
+	dev_dbg(&intf->dev, "%s - %d\n", __func__, enable);
 
-	ret = gb_interface_route_create(intf);
-	if (ret)
+	ret = gb_svc_intf_vsys_set(svc, intf->interface_id, enable);
+	if (ret) {
+		dev_err(&intf->dev, "failed to enable v_sys: %d\n", ret);
 		return ret;
+	}
 
 	return 0;
 }
 
+static int gb_interface_refclk_set(struct gb_interface *intf, bool enable)
+{
+	struct gb_svc *svc = intf->hd->svc;
+	int ret;
+
+	dev_dbg(&intf->dev, "%s - %d\n", __func__, enable);
+
+	ret = gb_svc_intf_refclk_set(svc, intf->interface_id, enable);
+	if (ret) {
+		dev_err(&intf->dev, "failed to enable refclk: %d\n", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+static int gb_interface_unipro_set(struct gb_interface *intf, bool enable)
+{
+	struct gb_svc *svc = intf->hd->svc;
+	int ret;
+
+	dev_dbg(&intf->dev, "%s - %d\n", __func__, enable);
+
+	ret = gb_svc_intf_unipro_set(svc, intf->interface_id, enable);
+	if (ret) {
+		dev_err(&intf->dev, "failed to enable UniPro: %d\n", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+static int gb_interface_activate_operation(struct gb_interface *intf)
+{
+	struct gb_svc *svc = intf->hd->svc;
+	u8 type;
+	int ret;
+
+	dev_dbg(&intf->dev, "%s\n", __func__);
+
+	ret = gb_svc_intf_activate(svc, intf->interface_id, &type);
+	if (ret) {
+		dev_err(&intf->dev, "failed to activate: %d\n", ret);
+		return ret;
+	}
+
+	switch (type) {
+	case GB_SVC_INTF_TYPE_DUMMY:
+		dev_info(&intf->dev, "dummy interface detected\n");
+		/* FIXME: handle as an error for now */
+		return -ENODEV;
+	case GB_SVC_INTF_TYPE_UNIPRO:
+		dev_err(&intf->dev, "interface type UniPro not supported\n");
+		return -ENODEV;
+	case GB_SVC_INTF_TYPE_GREYBUS:
+		break;
+	default:
+		dev_err(&intf->dev, "unknown interface type: %u\n", type);
+		return -ENODEV;
+	}
+
+	return 0;
+}
+
+static int gb_interface_hibernate_link(struct gb_interface *intf)
+{
+	dev_dbg(&intf->dev, "%s\n", __func__);
+
+	/* FIXME: implement */
+
+	return 0;
+}
+
+/*
+ * Activate an interface.
+ *
+ * Locking: Caller holds the interface mutex.
+ */
+int gb_interface_activate(struct gb_interface *intf)
+{
+	int ret;
+
+	if (intf->ejected)
+		return -ENODEV;
+
+	ret = gb_interface_vsys_set(intf, true);
+	if (ret)
+		return ret;
+
+	ret = gb_interface_refclk_set(intf, true);
+	if (ret)
+		goto err_vsys_disable;
+
+	ret = gb_interface_unipro_set(intf, true);
+	if (ret)
+		goto err_refclk_disable;
+
+	ret = gb_interface_activate_operation(intf);
+	if (ret)
+		goto err_unipro_disable;
+
+	ret = gb_interface_read_dme(intf);
+	if (ret)
+		goto err_hibernate_link;
+
+	ret = gb_interface_route_create(intf);
+	if (ret)
+		goto err_hibernate_link;
+
+	intf->active = true;
+
+	return 0;
+
+err_hibernate_link:
+	gb_interface_hibernate_link(intf);
+err_unipro_disable:
+	gb_interface_unipro_set(intf, false);
+err_refclk_disable:
+	gb_interface_refclk_set(intf, false);
+err_vsys_disable:
+	gb_interface_vsys_set(intf, false);
+
+	return ret;
+}
+
+/*
+ * Deactivate an interface.
+ *
+ * Locking: Caller holds the interface mutex.
+ */
 void gb_interface_deactivate(struct gb_interface *intf)
 {
+	if (!intf->active)
+		return;
+
 	gb_interface_route_destroy(intf);
+	gb_interface_hibernate_link(intf);
+	gb_interface_unipro_set(intf, false);
+	gb_interface_refclk_set(intf, false);
+	gb_interface_vsys_set(intf, false);
+
+	intf->active = false;
 }
 
 /*
  * Enable an interface by enabling its control connection, fetching the
  * manifest and other information over it, and finally registering its child
  * devices.
+ *
+ * Locking: Caller holds the interface mutex.
  */
 int gb_interface_enable(struct gb_interface *intf)
 {
@@ -533,7 +662,11 @@ err_put_control:
 	return ret;
 }
 
-/* Disable an interface and destroy its bundles. */
+/*
+ * Disable an interface and destroy its bundles.
+ *
+ * Locking: Caller holds the interface mutex.
+ */
 void gb_interface_disable(struct gb_interface *intf)
 {
 	struct gb_bundle *bundle;
@@ -579,15 +712,16 @@ int gb_interface_add(struct gb_interface *intf)
 	return 0;
 }
 
-/* Deregister an interface and drop its reference. */
-void gb_interface_remove(struct gb_interface *intf)
+/* Deregister an interface. */
+void gb_interface_del(struct gb_interface *intf)
 {
 	if (device_is_registered(&intf->dev)) {
 		device_del(&intf->dev);
 		dev_info(&intf->dev, "Interface removed\n");
 	}
+}
 
-	list_del(&intf->links);
-
+void gb_interface_put(struct gb_interface *intf)
+{
 	put_device(&intf->dev);
 }

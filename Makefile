@@ -2,6 +2,7 @@ greybus-y :=	core.o		\
 		debugfs.o	\
 		hd.o		\
 		manifest.o	\
+		module.o	\
 		interface.o	\
 		bundle.o	\
 		connection.o	\
@@ -38,6 +39,7 @@ gb-audio-apbridgea-y := audio_apbridgea.o
 gb-audio-manager-y += audio_manager.o
 gb-audio-manager-y += audio_manager_module.o
 gb-camera-y := camera.o
+gb-firmware-y := fw-core.o fw-download.o
 
 obj-m += greybus.o
 obj-m += gb-phy.o
@@ -51,16 +53,15 @@ obj-m += gb-es2.o
 ifeq ($(CONFIG_USB_HSIC_USB3613),y)
  obj-m += gb-arche.o
 endif
-ifeq ($(CONFIG_SND_SOC_DYNAMIC_DAILINK),y)
- obj-m += gb-audio-codec.o
-obj-m += gb-audio-module.o
-endif
 ifeq ($(CONFIG_ARCH_MSM8994),y)
+ obj-m += gb-audio-codec.o
+ obj-m += gb-audio-module.o
  obj-m += gb-camera.o
 endif
 obj-m += gb-audio-gb.o
 obj-m += gb-audio-apbridgea.o
 obj-m += gb-audio-manager.o
+obj-m += gb-firmware.o
 
 KERNELVER		?= $(shell uname -r)
 KERNELDIR 		?= /lib/modules/$(KERNELVER)/build

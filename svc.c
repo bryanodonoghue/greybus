@@ -253,6 +253,36 @@ int gb_svc_intf_eject(struct gb_svc *svc, u8 intf_id)
 	return 0;
 }
 
+int gb_svc_intf_vsys_set(struct gb_svc *svc, u8 intf_id, bool enable)
+{
+	/* FIXME: implement */
+
+	return 0;
+}
+
+int gb_svc_intf_refclk_set(struct gb_svc *svc, u8 intf_id, bool enable)
+{
+	/* FIXME: implement */
+
+	return 0;
+}
+
+int gb_svc_intf_unipro_set(struct gb_svc *svc, u8 intf_id, bool enable)
+{
+	/* FIXME: implement */
+
+	return 0;
+}
+
+int gb_svc_intf_activate(struct gb_svc *svc, u8 intf_id, u8 *intf_type)
+{
+	/* FIXME: implement */
+
+	*intf_type = GB_SVC_INTF_TYPE_GREYBUS;
+
+	return 0;
+}
+
 int gb_svc_dme_peer_get(struct gb_svc *svc, u8 intf_id, u16 attr, u16 selector,
 			u32 *value)
 {
@@ -435,8 +465,8 @@ static int gb_svc_version_request(struct gb_operation *op)
 {
 	struct gb_connection *connection = op->connection;
 	struct gb_svc *svc = gb_connection_get_data(connection);
-	struct gb_protocol_version_request *request;
-	struct gb_protocol_version_response *response;
+	struct gb_svc_version_request *request;
+	struct gb_svc_version_response *response;
 
 	if (op->request->payload_size < sizeof(*request)) {
 		dev_err(&svc->dev, "short version request (%zu < %zu)\n",
@@ -546,43 +576,45 @@ static const struct file_operations pwrmon_debugfs_power_fops = {
 	.read		= pwr_debugfs_power_read,
 };
 
-static void svc_pwrmon_debugfs_init(struct gb_svc *svc)
+static void gb_svc_pwrmon_debugfs_init(struct gb_svc *svc)
 {
 	int i;
 	size_t bufsize;
 	struct dentry *dent;
+	struct gb_svc_pwrmon_rail_names_get_response *rail_names;
+	u8 rail_count;
 
 	dent = debugfs_create_dir("pwrmon", svc->debugfs_dentry);
 	if (IS_ERR_OR_NULL(dent))
 		return;
 
-	if (gb_svc_pwrmon_rail_count_get(svc, &svc->rail_count))
+	if (gb_svc_pwrmon_rail_count_get(svc, &rail_count))
 		goto err_pwrmon_debugfs;
 
-	if (!svc->rail_count || svc->rail_count > GB_SVC_PWRMON_MAX_RAIL_COUNT)
+	if (!rail_count || rail_count > GB_SVC_PWRMON_MAX_RAIL_COUNT)
 		goto err_pwrmon_debugfs;
 
-	bufsize = GB_SVC_PWRMON_RAIL_NAME_BUFSIZE * svc->rail_count;
+	bufsize = GB_SVC_PWRMON_RAIL_NAME_BUFSIZE * rail_count;
 
-	svc->rail_names = kzalloc(bufsize, GFP_KERNEL);
-	if (!svc->rail_names)
+	rail_names = kzalloc(bufsize, GFP_KERNEL);
+	if (!rail_names)
 		goto err_pwrmon_debugfs;
 
-	svc->pwrmon_rails = kcalloc(svc->rail_count, sizeof(*svc->pwrmon_rails),
+	svc->pwrmon_rails = kcalloc(rail_count, sizeof(*svc->pwrmon_rails),
 				    GFP_KERNEL);
 	if (!svc->pwrmon_rails)
 		goto err_pwrmon_debugfs_free;
 
-	if (gb_svc_pwrmon_rail_names_get(svc, svc->rail_names, bufsize))
+	if (gb_svc_pwrmon_rail_names_get(svc, rail_names, bufsize))
 		goto err_pwrmon_debugfs_free;
 
-	for (i = 0; i < svc->rail_count; i++) {
+	for (i = 0; i < rail_count; i++) {
 		struct dentry *dir;
 		struct svc_debugfs_pwrmon_rail *rail = &svc->pwrmon_rails[i];
 		char fname[GB_SVC_PWRMON_RAIL_NAME_BUFSIZE];
 
 		snprintf(fname, sizeof(fname), "%s",
-			 (char *)&svc->rail_names->name[i]);
+			 (char *)&rail_names->name[i]);
 
 		rail->id = i;
 		rail->svc = svc;
@@ -595,12 +627,12 @@ static void svc_pwrmon_debugfs_init(struct gb_svc *svc)
 		debugfs_create_file("power_now", S_IRUGO, dir, rail,
 				    &pwrmon_debugfs_power_fops);
 	};
+
+	kfree(rail_names);
 	return;
 
 err_pwrmon_debugfs_free:
-	kfree(svc->rail_names);
-	svc->rail_names = NULL;
-
+	kfree(rail_names);
 	kfree(svc->pwrmon_rails);
 	svc->pwrmon_rails = NULL;
 
@@ -608,17 +640,18 @@ err_pwrmon_debugfs:
 	debugfs_remove(dent);
 }
 
-static void svc_debugfs_init(struct gb_svc *svc)
+static void gb_svc_debugfs_init(struct gb_svc *svc)
 {
 	svc->debugfs_dentry = debugfs_create_dir(dev_name(&svc->dev),
 						 gb_debugfs_get());
-	svc_pwrmon_debugfs_init(svc);
+	gb_svc_pwrmon_debugfs_init(svc);
 }
 
-static void svc_debugfs_exit(struct gb_svc *svc)
+static void gb_svc_debugfs_exit(struct gb_svc *svc)
 {
 	debugfs_remove_recursive(svc->debugfs_dentry);
-	kfree(svc->rail_names);
+	kfree(svc->pwrmon_rails);
+	svc->pwrmon_rails = NULL;
 }
 
 static int gb_svc_hello(struct gb_operation *op)
@@ -660,9 +693,65 @@ static int gb_svc_hello(struct gb_operation *op)
 		return ret;
 	}
 
-	svc_debugfs_init(svc);
+	gb_svc_debugfs_init(svc);
 
 	return 0;
+}
+
+static struct gb_interface *gb_svc_interface_lookup(struct gb_svc *svc,
+							u8 intf_id)
+{
+	struct gb_host_device *hd = svc->hd;
+	struct gb_module *module;
+	size_t num_interfaces;
+	u8 module_id;
+
+	list_for_each_entry(module, &hd->modules, hd_node) {
+		module_id = module->module_id;
+		num_interfaces = module->num_interfaces;
+
+		if (intf_id >= module_id &&
+				intf_id < module_id + num_interfaces) {
+			return module->interfaces[intf_id - module_id];
+		}
+	}
+
+	return NULL;
+}
+
+static struct gb_module *gb_svc_module_lookup(struct gb_svc *svc, u8 module_id)
+{
+	struct gb_host_device *hd = svc->hd;
+	struct gb_module *module;
+
+	list_for_each_entry(module, &hd->modules, hd_node) {
+		if (module->module_id == module_id)
+			return module;
+	}
+
+	return NULL;
+}
+
+static void gb_svc_intf_reenable(struct gb_svc *svc, struct gb_interface *intf)
+{
+	int ret;
+
+	mutex_lock(&intf->mutex);
+
+	/* Mark as disconnected to prevent I/O during disable. */
+	intf->disconnected = true;
+	gb_interface_disable(intf);
+	intf->disconnected = false;
+
+	ret = gb_interface_enable(intf);
+	if (ret) {
+		dev_err(&svc->dev, "failed to enable interface %u: %d\n",
+				intf->interface_id, ret);
+
+		gb_interface_deactivate(intf);
+	}
+
+	mutex_unlock(&intf->mutex);
 }
 
 static void gb_svc_process_intf_hotplug(struct gb_operation *operation)
@@ -671,7 +760,7 @@ static void gb_svc_process_intf_hotplug(struct gb_operation *operation)
 	struct gb_connection *connection = operation->connection;
 	struct gb_svc *svc = gb_connection_get_data(connection);
 	struct gb_host_device *hd = connection->hd;
-	struct gb_interface *intf;
+	struct gb_module *module;
 	u8 intf_id;
 	int ret;
 
@@ -681,58 +770,35 @@ static void gb_svc_process_intf_hotplug(struct gb_operation *operation)
 
 	dev_dbg(&svc->dev, "%s - id = %u\n", __func__, intf_id);
 
-	intf = gb_interface_find(hd, intf_id);
-	if (intf) {
+	/* All modules are considered 1x2 for now */
+	module = gb_svc_module_lookup(svc, intf_id);
+	if (module) {
 		dev_info(&svc->dev, "mode switch detected on interface %u\n",
 				intf_id);
 
-		/* Mark as disconnected to prevent I/O during disable. */
-		intf->disconnected = true;
-		gb_interface_disable(intf);
-		intf->disconnected = false;
-
-		goto enable_interface;
+		return gb_svc_intf_reenable(svc, module->interfaces[0]);
 	}
 
-	intf = gb_interface_create(hd, intf_id);
-	if (!intf) {
-		dev_err(&svc->dev, "failed to create interface %u\n",
-				intf_id);
+	module = gb_module_create(hd, intf_id, 1);
+	if (!module) {
+		dev_err(&svc->dev, "failed to create module\n");
 		return;
 	}
 
-	ret = gb_interface_activate(intf);
+	ret = gb_module_add(module);
 	if (ret) {
-		dev_err(&svc->dev, "failed to activate interface %u: %d\n",
-				intf_id, ret);
-		gb_interface_add(intf);
+		gb_module_put(module);
 		return;
 	}
 
-	ret = gb_interface_add(intf);
-	if (ret)
-		goto err_interface_deactivate;
-
-enable_interface:
-	ret = gb_interface_enable(intf);
-	if (ret) {
-		dev_err(&svc->dev, "failed to enable interface %u: %d\n",
-				intf_id, ret);
-		goto err_interface_deactivate;
-	}
-
-	return;
-
-err_interface_deactivate:
-	gb_interface_deactivate(intf);
+	list_add(&module->hd_node, &hd->modules);
 }
 
 static void gb_svc_process_intf_hot_unplug(struct gb_operation *operation)
 {
 	struct gb_svc *svc = gb_connection_get_data(operation->connection);
 	struct gb_svc_intf_hot_unplug_request *request;
-	struct gb_host_device *hd = operation->connection->hd;
-	struct gb_interface *intf;
+	struct gb_module *module;
 	u8 intf_id;
 
 	/* The request message size has already been verified. */
@@ -741,19 +807,147 @@ static void gb_svc_process_intf_hot_unplug(struct gb_operation *operation)
 
 	dev_dbg(&svc->dev, "%s - id = %u\n", __func__, intf_id);
 
-	intf = gb_interface_find(hd, intf_id);
-	if (!intf) {
+	/* All modules are considered 1x2 for now */
+	module = gb_svc_module_lookup(svc, intf_id);
+	if (!module) {
 		dev_warn(&svc->dev, "could not find hot-unplug interface %u\n",
 				intf_id);
 		return;
 	}
 
-	/* Mark as disconnected to prevent I/O during disable. */
-	intf->disconnected = true;
+	module->disconnected = true;
 
+	gb_module_del(module);
+	list_del(&module->hd_node);
+	gb_module_put(module);
+}
+
+static void gb_svc_process_module_inserted(struct gb_operation *operation)
+{
+	struct gb_svc_module_inserted_request *request;
+	struct gb_connection *connection = operation->connection;
+	struct gb_svc *svc = gb_connection_get_data(connection);
+	struct gb_host_device *hd = svc->hd;
+	struct gb_module *module;
+	size_t num_interfaces;
+	u8 module_id;
+	u16 flags;
+	int ret;
+
+	/* The request message size has already been verified. */
+	request = operation->request->payload;
+	module_id = request->primary_intf_id;
+	num_interfaces = request->intf_count;
+	flags = le16_to_cpu(request->flags);
+
+	dev_dbg(&svc->dev, "%s - id = %u, num_interfaces = %zu, flags = 0x%04x\n",
+			__func__, module_id, num_interfaces, flags);
+
+	if (flags & GB_SVC_MODULE_INSERTED_FLAG_NO_PRIMARY) {
+		dev_warn(&svc->dev, "no primary interface detected on module %u\n",
+				module_id);
+	}
+
+	module = gb_svc_module_lookup(svc, module_id);
+	if (module) {
+		dev_warn(&svc->dev, "unexpected module-inserted event %u\n",
+				module_id);
+		return;
+	}
+
+	module = gb_module_create(hd, module_id, num_interfaces);
+	if (!module) {
+		dev_err(&svc->dev, "failed to create module\n");
+		return;
+	}
+
+	ret = gb_module_add(module);
+	if (ret) {
+		gb_module_put(module);
+		return;
+	}
+
+	list_add(&module->hd_node, &hd->modules);
+}
+
+static void gb_svc_process_module_removed(struct gb_operation *operation)
+{
+	struct gb_svc_module_removed_request *request;
+	struct gb_connection *connection = operation->connection;
+	struct gb_svc *svc = gb_connection_get_data(connection);
+	struct gb_module *module;
+	u8 module_id;
+
+	/* The request message size has already been verified. */
+	request = operation->request->payload;
+	module_id = request->primary_intf_id;
+
+	dev_dbg(&svc->dev, "%s - id = %u\n", __func__, module_id);
+
+	module = gb_svc_module_lookup(svc, module_id);
+	if (!module) {
+		dev_warn(&svc->dev, "unexpected module-removed event %u\n",
+				module_id);
+		return;
+	}
+
+	module->disconnected = true;
+
+	gb_module_del(module);
+	list_del(&module->hd_node);
+	gb_module_put(module);
+}
+
+static void gb_svc_process_intf_mailbox_event(struct gb_operation *operation)
+{
+	struct gb_svc_intf_mailbox_event_request *request;
+	struct gb_connection *connection = operation->connection;
+	struct gb_svc *svc = gb_connection_get_data(connection);
+	struct gb_interface *intf;
+	u8 intf_id;
+	u16 result_code;
+	u32 mailbox;
+
+	/* The request message size has already been verified. */
+	request = operation->request->payload;
+	intf_id = request->intf_id;
+	result_code = le16_to_cpu(request->result_code);
+	mailbox = le32_to_cpu(request->mailbox);
+
+	dev_dbg(&svc->dev, "%s - id = %u, result = 0x%04x, mailbox = 0x%08x\n",
+			__func__, intf_id, result_code, mailbox);
+
+	intf = gb_svc_interface_lookup(svc, intf_id);
+	if (!intf) {
+		dev_warn(&svc->dev, "unexpected mailbox event %u\n", intf_id);
+		return;
+	}
+
+	if (result_code) {
+		dev_warn(&svc->dev,
+				"mailbox event %u with UniPro error: 0x%04x\n",
+				intf_id, result_code);
+		goto err_disable_interface;
+	}
+
+	if (mailbox != GB_SVC_INTF_MAILBOX_GREYBUS) {
+		dev_warn(&svc->dev,
+				"mailbox event %u with unexected value: 0x%08x\n",
+				intf_id, mailbox);
+		goto err_disable_interface;
+	}
+
+	dev_info(&svc->dev, "mode switch detected on interface %u\n", intf_id);
+
+	gb_svc_intf_reenable(svc, intf);
+
+	return;
+
+err_disable_interface:
+	mutex_lock(&intf->mutex);
 	gb_interface_disable(intf);
 	gb_interface_deactivate(intf);
-	gb_interface_remove(intf);
+	mutex_unlock(&intf->mutex);
 }
 
 static void gb_svc_process_deferred_request(struct work_struct *work)
@@ -774,6 +968,15 @@ static void gb_svc_process_deferred_request(struct work_struct *work)
 		break;
 	case GB_SVC_TYPE_INTF_HOT_UNPLUG:
 		gb_svc_process_intf_hot_unplug(operation);
+		break;
+	case GB_SVC_TYPE_MODULE_INSERTED:
+		gb_svc_process_module_inserted(operation);
+		break;
+	case GB_SVC_TYPE_MODULE_REMOVED:
+		gb_svc_process_module_removed(operation);
+		break;
+	case GB_SVC_TYPE_INTF_MAILBOX_EVENT:
+		gb_svc_process_intf_mailbox_event(operation);
 		break;
 	default:
 		dev_err(&svc->dev, "bad deferred request type: 0x%02x\n", type);
@@ -915,6 +1118,62 @@ static int gb_svc_key_event_recv(struct gb_operation *op)
 	return 0;
 }
 
+static int gb_svc_module_inserted_recv(struct gb_operation *op)
+{
+	struct gb_svc *svc = gb_connection_get_data(op->connection);
+	struct gb_svc_module_inserted_request *request;
+
+	if (op->request->payload_size < sizeof(*request)) {
+		dev_warn(&svc->dev, "short module-inserted request received (%zu < %zu)\n",
+				op->request->payload_size, sizeof(*request));
+		return -EINVAL;
+	}
+
+	request = op->request->payload;
+
+	dev_dbg(&svc->dev, "%s - id = %u\n", __func__,
+			request->primary_intf_id);
+
+	return gb_svc_queue_deferred_request(op);
+}
+
+static int gb_svc_module_removed_recv(struct gb_operation *op)
+{
+	struct gb_svc *svc = gb_connection_get_data(op->connection);
+	struct gb_svc_module_removed_request *request;
+
+	if (op->request->payload_size < sizeof(*request)) {
+		dev_warn(&svc->dev, "short module-removed request received (%zu < %zu)\n",
+				op->request->payload_size, sizeof(*request));
+		return -EINVAL;
+	}
+
+	request = op->request->payload;
+
+	dev_dbg(&svc->dev, "%s - id = %u\n", __func__,
+			request->primary_intf_id);
+
+	return gb_svc_queue_deferred_request(op);
+}
+
+static int gb_svc_intf_mailbox_event_recv(struct gb_operation *op)
+{
+	struct gb_svc *svc = gb_connection_get_data(op->connection);
+	struct gb_svc_intf_mailbox_event_request *request;
+
+	if (op->request->payload_size < sizeof(*request)) {
+		dev_warn(&svc->dev, "short mailbox request received (%zu < %zu)\n",
+				op->request->payload_size, sizeof(*request));
+		return -EINVAL;
+	}
+
+	request = op->request->payload;
+
+	dev_dbg(&svc->dev, "%s - id = %u\n", __func__, request->intf_id);
+
+	return gb_svc_queue_deferred_request(op);
+}
+
 static int gb_svc_request_handler(struct gb_operation *op)
 {
 	struct gb_connection *connection = op->connection;
@@ -933,7 +1192,7 @@ static int gb_svc_request_handler(struct gb_operation *op)
 	 * need to protect 'state' for any races.
 	 */
 	switch (type) {
-	case GB_REQUEST_TYPE_PROTOCOL_VERSION:
+	case GB_SVC_TYPE_PROTOCOL_VERSION:
 		if (svc->state != GB_SVC_STATE_RESET)
 			ret = -EINVAL;
 		break;
@@ -954,7 +1213,7 @@ static int gb_svc_request_handler(struct gb_operation *op)
 	}
 
 	switch (type) {
-	case GB_REQUEST_TYPE_PROTOCOL_VERSION:
+	case GB_SVC_TYPE_PROTOCOL_VERSION:
 		ret = gb_svc_version_request(op);
 		if (!ret)
 			svc->state = GB_SVC_STATE_PROTOCOL_VERSION;
@@ -972,6 +1231,12 @@ static int gb_svc_request_handler(struct gb_operation *op)
 		return gb_svc_intf_reset_recv(op);
 	case GB_SVC_TYPE_KEY_EVENT:
 		return gb_svc_key_event_recv(op);
+	case GB_SVC_TYPE_MODULE_INSERTED:
+		return gb_svc_module_inserted_recv(op);
+	case GB_SVC_TYPE_MODULE_REMOVED:
+		return gb_svc_module_removed_recv(op);
+	case GB_SVC_TYPE_INTF_MAILBOX_EVENT:
+		return gb_svc_intf_mailbox_event_recv(op);
 	default:
 		dev_warn(&svc->dev, "unsupported request 0x%02x\n", type);
 		return -EINVAL;
@@ -1092,14 +1357,15 @@ int gb_svc_add(struct gb_svc *svc)
 	return 0;
 }
 
-static void gb_svc_remove_interfaces(struct gb_svc *svc)
+static void gb_svc_remove_modules(struct gb_svc *svc)
 {
-	struct gb_interface *intf, *tmp;
+	struct gb_host_device *hd = svc->hd;
+	struct gb_module *module, *tmp;
 
-	list_for_each_entry_safe(intf, tmp, &svc->hd->interfaces, links) {
-		gb_interface_disable(intf);
-		gb_interface_deactivate(intf);
-		gb_interface_remove(intf);
+	list_for_each_entry_safe(module, tmp, &hd->modules, hd_node) {
+		gb_module_del(module);
+		list_del(&module->hd_node);
+		gb_module_put(module);
 	}
 }
 
@@ -1112,7 +1378,7 @@ void gb_svc_del(struct gb_svc *svc)
 	 * from the request handler.
 	 */
 	if (device_is_registered(&svc->dev)) {
-		svc_debugfs_exit(svc);
+		gb_svc_debugfs_exit(svc);
 		gb_svc_watchdog_destroy(svc);
 		input_unregister_device(svc->input);
 		device_del(&svc->dev);
@@ -1120,7 +1386,7 @@ void gb_svc_del(struct gb_svc *svc)
 
 	flush_workqueue(svc->wq);
 
-	gb_svc_remove_interfaces(svc);
+	gb_svc_remove_modules(svc);
 }
 
 void gb_svc_put(struct gb_svc *svc)

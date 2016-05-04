@@ -95,9 +95,9 @@ struct gb_operation_msg_hdr {
 } __packed;
 
 
-/* Generic request numbers supported by all modules */
-#define GB_REQUEST_TYPE_INVALID			0x00
+/* Generic request types */
 #define GB_REQUEST_TYPE_PROTOCOL_VERSION	0x01
+#define GB_REQUEST_TYPE_INVALID			0x7f
 
 struct gb_protocol_version_request {
 	__u8	major;
@@ -123,6 +123,7 @@ struct gb_protocol_version_response {
 #define GB_CONTROL_TYPE_TIMESYNC_AUTHORITATIVE	0x09
 #define GB_CONTROL_TYPE_INTERFACE_VERSION	0x0a
 #define GB_CONTROL_TYPE_BUNDLE_VERSION		0x0b
+#define GB_CONTROL_TYPE_MODE_SWITCH		0x0e
 
 struct gb_control_version_request {
 	__u8	major;
@@ -211,6 +212,43 @@ struct gb_control_timesync_authoritative_request {
 /* vendor requests to enable/disable CPort features */
 #define GB_APB_REQUEST_CPORT_FEAT_EN	0x0b
 #define GB_APB_REQUEST_CPORT_FEAT_DIS	0x0c
+
+/* Firmware Download Protocol */
+
+/* Request Types */
+#define GB_FW_DOWNLOAD_TYPE_FIND_FIRMWARE	0x01
+#define GB_FW_DOWNLOAD_TYPE_FETCH_FIRMWARE	0x02
+#define GB_FW_DOWNLOAD_TYPE_RELEASE_FIRMWARE	0x03
+
+#define GB_FIRMWARE_TAG_MAX_LEN			10
+
+/* firmware download find firmware request/response */
+struct gb_fw_download_find_firmware_request {
+	__u8			firmware_tag[GB_FIRMWARE_TAG_MAX_LEN];
+} __packed;
+
+struct gb_fw_download_find_firmware_response {
+	__u8			firmware_id;
+	__le32			size;
+} __packed;
+
+/* firmware download fetch firmware request/response */
+struct gb_fw_download_fetch_firmware_request {
+	__u8			firmware_id;
+	__le32			offset;
+	__le32			size;
+} __packed;
+
+struct gb_fw_download_fetch_firmware_response {
+	__u8			data[0];
+} __packed;
+
+/* firmware download release firmware request */
+struct gb_fw_download_release_firmware_request {
+	__u8			firmware_id;
+} __packed;
+/* firmware download release firmware response has no payload */
+
 
 /* Bootrom Protocol */
 
@@ -780,6 +818,7 @@ struct gb_spi_transfer_response {
 #define GB_SVC_VERSION_MINOR		0x01
 
 /* Greybus SVC request types */
+#define GB_SVC_TYPE_PROTOCOL_VERSION		0x01
 #define GB_SVC_TYPE_SVC_HELLO			0x02
 #define GB_SVC_TYPE_INTF_DEVICE_ID		0x03
 #define GB_SVC_TYPE_INTF_HOTPLUG		0x04
@@ -802,11 +841,20 @@ struct gb_spi_transfer_response {
 #define GB_SVC_TYPE_PWRMON_RAIL_NAMES_GET	0x15
 #define GB_SVC_TYPE_PWRMON_SAMPLE_GET		0x16
 #define GB_SVC_TYPE_PWRMON_INTF_SAMPLE_GET	0x17
+#define GB_SVC_TYPE_MODULE_INSERTED		0x1f
+#define GB_SVC_TYPE_MODULE_REMOVED		0x20
+#define GB_SVC_TYPE_INTF_ACTIVATE		0x27
+#define GB_SVC_TYPE_INTF_MAILBOX_EVENT		0x29
 
-/*
- * SVC version request/response has the same payload as
- * gb_protocol_version_request/response.
- */
+struct gb_svc_version_request {
+	__u8	major;
+	__u8	minor;
+} __packed;
+
+struct gb_svc_version_response {
+	__u8	major;
+	__u8	minor;
+} __packed;
 
 /* SVC protocol hello request */
 struct gb_svc_hello_request {
@@ -1007,6 +1055,45 @@ struct gb_svc_pwrmon_intf_sample_get_response {
 	__u8	result;
 	__le32	measurement;
 } __packed;
+
+#define GB_SVC_MODULE_INSERTED_FLAG_NO_PRIMARY	0x0001
+
+struct gb_svc_module_inserted_request {
+	__u8	primary_intf_id;
+	__u8	intf_count;
+	__le16	flags;
+} __packed;
+/* module_inserted response has no payload */
+
+struct gb_svc_module_removed_request {
+	__u8	primary_intf_id;
+} __packed;
+/* module_removed response has no payload */
+
+struct gb_svc_intf_activate_request {
+	__u8	intf_id;
+} __packed;
+
+#define GB_SVC_INTF_TYPE_UNKNOWN		0x00
+#define GB_SVC_INTF_TYPE_DUMMY			0x01
+#define GB_SVC_INTF_TYPE_UNIPRO			0x02
+#define GB_SVC_INTF_TYPE_GREYBUS		0x03
+
+struct gb_svc_intf_activate_response {
+	__u8	intf_type;
+} __packed;
+
+#define GB_SVC_INTF_MAILBOX_NONE		0x00
+#define GB_SVC_INTF_MAILBOX_AP			0x01
+#define GB_SVC_INTF_MAILBOX_GREYBUS		0x02
+
+struct gb_svc_intf_mailbox_event_request {
+	__u8	intf_id;
+	__le16	result_code;
+	__le32	mailbox;
+} __packed;
+/* intf_mailbox_event response has no payload */
+
 
 /* RAW */
 
@@ -1879,7 +1966,7 @@ struct gb_audio_deactivate_rx_request {
 
 struct gb_audio_jack_event_request {
 	__u8	widget_id;
-	__u8	widget_type;
+	__u8	jack_attribute;
 	__u8	event;
 } __packed;
 

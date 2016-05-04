@@ -48,8 +48,6 @@ struct gb_svc {
 
 	struct dentry *debugfs_dentry;
 	struct svc_debugfs_pwrmon_rail *pwrmon_rails;
-	struct gb_svc_pwrmon_rail_names_get_response *rail_names;
-	u8 rail_count;
 };
 #define to_gb_svc(d) container_of(d, struct gb_svc, dev)
 
@@ -69,6 +67,10 @@ int gb_svc_connection_create(struct gb_svc *svc, u8 intf1_id, u16 cport1_id,
 void gb_svc_connection_destroy(struct gb_svc *svc, u8 intf1_id, u16 cport1_id,
 			       u8 intf2_id, u16 cport2_id);
 int gb_svc_intf_eject(struct gb_svc *svc, u8 intf_id);
+int gb_svc_intf_vsys_set(struct gb_svc *svc, u8 intf_id, bool enable);
+int gb_svc_intf_refclk_set(struct gb_svc *svc, u8 intf_id, bool enable);
+int gb_svc_intf_unipro_set(struct gb_svc *svc, u8 intf_id, bool enable);
+int gb_svc_intf_activate(struct gb_svc *svc, u8 intf_id, u8 *intf_type);
 int gb_svc_dme_peer_get(struct gb_svc *svc, u8 intf_id, u16 attr, u16 selector,
 			u32 *value);
 int gb_svc_dme_peer_set(struct gb_svc *svc, u8 intf_id, u16 attr, u16 selector,

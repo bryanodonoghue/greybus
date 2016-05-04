@@ -282,10 +282,10 @@ static void gb_operation_message_init(struct gb_host_device *hd,
 
 	/*
 	 * The type supplied for incoming message buffers will be
-	 * 0x00.  Such buffers will be overwritten by arriving data
-	 * so there's no need to initialize the message header.
+	 * GB_REQUEST_TYPE_INVALID. Such buffers will be overwritten by
+	 * arriving data so there's no need to initialize the message header.
 	 */
-	if (type != GB_OPERATION_TYPE_INVALID) {
+	if (type != GB_REQUEST_TYPE_INVALID) {
 		u16 message_size = (u16)(sizeof(*header) + payload_size);
 
 		/*
@@ -536,7 +536,7 @@ gb_operation_create_flags(struct gb_connection *connection,
 				size_t response_size, unsigned long flags,
 				gfp_t gfp)
 {
-	if (WARN_ON_ONCE(type == GB_OPERATION_TYPE_INVALID))
+	if (WARN_ON_ONCE(type == GB_REQUEST_TYPE_INVALID))
 		return NULL;
 	if (WARN_ON_ONCE(type & GB_MESSAGE_TYPE_RESPONSE))
 		type &= ~GB_MESSAGE_TYPE_RESPONSE;
@@ -573,7 +573,9 @@ gb_operation_create_incoming(struct gb_connection *connection, u16 id,
 		flags |= GB_OPERATION_FLAG_UNIDIRECTIONAL;
 
 	operation = gb_operation_create_common(connection, type,
-					request_size, 0, flags, GFP_ATOMIC);
+						request_size,
+						GB_REQUEST_TYPE_INVALID,
+						flags, GFP_ATOMIC);
 	if (!operation)
 		return NULL;
 
@@ -627,13 +629,21 @@ static void gb_operation_sync_callback(struct gb_operation *operation)
 	complete(&operation->completion);
 }
 
-/*
- * Send an operation request message. The caller has filled in any payload so
- * the request message is ready to go. The callback function supplied will be
- * called when the response message has arrived indicating the operation is
- * complete. In that case, the callback function is responsible for fetching
- * the result of the operation using gb_operation_result() if desired, and
- * dropping the initial reference to the operation.
+/**
+ * gb_operation_request_send() - send an operation request message
+ * @operation:	the operation to initiate
+ * @callback:	the operation completion callback
+ * @gfp:	the memory flags to use for any allocations
+ *
+ * The caller has filled in any payload so the request message is ready to go.
+ * The callback function supplied will be called when the response message has
+ * arrived, a unidirectional request has been sent, or the operation is
+ * cancelled, indicating that the operation is complete. The callback function
+ * can fetch the result of the operation using gb_operation_result() if
+ * desired.
+ *
+ * Return: 0 if the request was successfully queued in the host-driver queues,
+ * or a negative errno.
  */
 int gb_operation_request_send(struct gb_operation *operation,
 				gb_operation_callback callback,
@@ -646,6 +656,7 @@ int gb_operation_request_send(struct gb_operation *operation,
 
 	if (!callback)
 		return -EINVAL;
+
 	/*
 	 * Record the callback function, which is executed in
 	 * non-atomic (workqueue) context when the final result
@@ -655,10 +666,15 @@ int gb_operation_request_send(struct gb_operation *operation,
 
 	/*
 	 * Assign the operation's id, and store it in the request header.
-	 * Zero is a reserved operation id.
+	 * Zero is a reserved operation id for unidirectional operations.
 	 */
-	cycle = (unsigned int)atomic_inc_return(&connection->op_cycle);
-	operation->id = (u16)(cycle % U16_MAX + 1);
+	if (gb_operation_is_unidirectional(operation)) {
+		operation->id = 0;
+	} else {
+		cycle = (unsigned int)atomic_inc_return(&connection->op_cycle);
+		operation->id = (u16)(cycle % U16_MAX + 1);
+	}
+
 	header = operation->request->header;
 	header->operation_id = cpu_to_le16(operation->id);
 
@@ -792,10 +808,11 @@ void greybus_message_sent(struct gb_host_device *hd,
 	 * reference to the operation.  If an error occurred, report
 	 * it.
 	 *
-	 * For requests, if there's no error, there's nothing more
-	 * to do until the response arrives.  If an error occurred
-	 * attempting to send it, record that as the result of
-	 * the operation and schedule its completion.
+	 * For requests, if there's no error and the operation in not
+	 * unidirectional, there's nothing more to do until the response
+	 * arrives. If an error occurred attempting to send it, or if the
+	 * operation is unidrectional, record the result of the operation and
+	 * schedule its completion.
 	 */
 	if (message == operation->response) {
 		if (status) {
@@ -803,9 +820,10 @@ void greybus_message_sent(struct gb_host_device *hd,
 				"%s: error sending response 0x%02x: %d\n",
 				connection->name, operation->type, status);
 		}
+
 		gb_operation_put_active(operation);
 		gb_operation_put(operation);
-	} else if (status) {
+	} else if (status || gb_operation_is_unidirectional(operation)) {
 		if (gb_operation_result_set(operation, status)) {
 			queue_work(gb_operation_completion_wq,
 					&operation->work);
@@ -868,6 +886,13 @@ static void gb_connection_recv_response(struct gb_connection *connection,
 	struct gb_message *message;
 	int errno = gb_operation_status_map(result);
 	size_t message_size;
+
+	if (!operation_id) {
+		dev_err(&connection->hd->dev,
+				"%s: invalid response id 0 received\n",
+				connection->name);
+		return;
+	}
 
 	operation = gb_operation_find_outgoing(connection, operation_id);
 	if (!operation) {
@@ -1006,7 +1031,7 @@ void gb_operation_cancel_incoming(struct gb_operation *operation, int errno)
 }
 
 /**
- * gb_operation_sync: implement a "simple" synchronous gb operation.
+ * gb_operation_sync_timeout() - implement a "simple" synchronous operation
  * @connection: the Greybus connection to send this to
  * @type: the type of operation to send
  * @request: pointer to a memory buffer to copy the request from
@@ -1066,6 +1091,53 @@ int gb_operation_sync_timeout(struct gb_connection *connection, int type,
 	return ret;
 }
 EXPORT_SYMBOL_GPL(gb_operation_sync_timeout);
+
+/**
+ * gb_operation_unidirectional_timeout() - initiate a unidirectional operation
+ * @connection:		connection to use
+ * @type:		type of operation to send
+ * @request:		memory buffer to copy the request from
+ * @request_size:	size of @request
+ * @timeout:		send timeout in milliseconds
+ *
+ * Initiate a unidirectional operation by sending a request message and
+ * waiting for it to be acknowledged as sent by the host device.
+ *
+ * Note that successful send of a unidirectional operation does not imply that
+ * the request as actually reached the remote end of the connection.
+ */
+int gb_operation_unidirectional_timeout(struct gb_connection *connection,
+				int type, void *request, int request_size,
+				unsigned int timeout)
+{
+	struct gb_operation *operation;
+	int ret;
+
+	if (request_size && !request)
+		return -EINVAL;
+
+	operation = gb_operation_create_flags(connection, type,
+					request_size, 0,
+					GB_OPERATION_FLAG_UNIDIRECTIONAL,
+					GFP_KERNEL);
+	if (!operation)
+		return -ENOMEM;
+
+	if (request_size)
+		memcpy(operation->request->payload, request, request_size);
+
+	ret = gb_operation_request_send_sync_timeout(operation, timeout);
+	if (ret) {
+		dev_err(&connection->hd->dev,
+			"%s: unidirectional operation of type 0x%02x failed: %d\n",
+			connection->name, type, ret);
+	}
+
+	gb_operation_put(operation);
+
+	return ret;
+}
+EXPORT_SYMBOL_GPL(gb_operation_unidirectional_timeout);
 
 int __init gb_operation_init(void)
 {
