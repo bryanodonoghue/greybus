@@ -14,9 +14,6 @@
 #include "audio_apbridgea.h"
 #include "audio_manager.h"
 
-static DEFINE_MUTEX(gb_codec_list_lock);
-static LIST_HEAD(gb_codec_list);
-
 /*
  * gb_snd management functions
  */
@@ -29,12 +26,10 @@ static int gbaudio_request_jack(struct gbaudio_module_info *module,
 	dev_warn(module->dev, "Jack Event received: type: %u, event: %u\n",
 		 req->jack_attribute, req->event);
 
-	mutex_lock(&module->lock);
 	if (req->event == GB_AUDIO_JACK_EVENT_REMOVAL) {
 		module->jack_type = 0;
 		button_status = module->button_status;
 		module->button_status = 0;
-		mutex_unlock(&module->lock);
 		if (button_status)
 			snd_soc_jack_report(&module->button_jack, 0,
 					    GBCODEC_JACK_BUTTON_MASK);
@@ -51,7 +46,6 @@ static int gbaudio_request_jack(struct gbaudio_module_info *module,
 			 module->jack_type, report);
 
 	module->jack_type = report;
-	mutex_unlock(&module->lock);
 	snd_soc_jack_report(&module->headset_jack, report, GBCODEC_JACK_MASK);
 
 	return 0;
@@ -66,10 +60,8 @@ static int gbaudio_request_button(struct gbaudio_module_info *module,
 		 req->button_id, req->event);
 
 	/* currently supports 4 buttons only */
-	mutex_lock(&module->lock);
 	if (!module->jack_type) {
 		dev_err(module->dev, "Jack not present. Bogus event!!\n");
-		mutex_unlock(&module->lock);
 		return -EINVAL;
 	}
 
@@ -102,8 +94,6 @@ static int gbaudio_request_button(struct gbaudio_module_info *module,
 		report = report & ~soc_button_id;
 
 	module->button_status = report;
-
-	mutex_unlock(&module->lock);
 
 	snd_soc_jack_report(&module->button_jack, report,
 			    GBCODEC_JACK_BUTTON_MASK);
@@ -183,7 +173,7 @@ static int gb_audio_add_mgmt_connection(struct gbaudio_module_info *gbmodule,
 	if (IS_ERR(connection))
 		return PTR_ERR(connection);
 
-	connection->private = gbmodule;
+	greybus_set_drvdata(bundle, gbmodule);
 	gbmodule->mgmt_connection = connection;
 
 	return 0;
@@ -211,7 +201,7 @@ static int gb_audio_add_data_connection(struct gbaudio_module_info *gbmodule,
 		return PTR_ERR(connection);
 	}
 
-	connection->private = gbmodule;
+	greybus_set_drvdata(bundle, gbmodule);
 	/* dai->name should be same as codec->dai_name */
 	strlcpy(dai->name, "greybus-apb1", NAME_SIZE);
 	dai->data_cport = connection->intf_cport_id;
@@ -241,19 +231,15 @@ static int gb_audio_probe(struct gb_bundle *bundle,
 	if (bundle->num_cports < 2)
 		return -ENODEV;
 
-	mutex_lock(&gb_codec_list_lock);
 	/*
 	 * There can be only one Management connection and any number of data
 	 * connections.
 	 */
 	gbmodule = devm_kzalloc(dev, sizeof(*gbmodule), GFP_KERNEL);
-	if (!gbmodule) {
-		mutex_unlock(&gb_codec_list_lock);
+	if (!gbmodule)
 		return -ENOMEM;
-	}
 
 	gbmodule->num_data_connections = bundle->num_cports - 1;
-	mutex_init(&gbmodule->lock);
 	INIT_LIST_HEAD(&gbmodule->data_list);
 	INIT_LIST_HEAD(&gbmodule->widget_list);
 	INIT_LIST_HEAD(&gbmodule->ctl_list);
@@ -322,18 +308,21 @@ static int gb_audio_probe(struct gb_bundle *bundle,
 	}
 	gbmodule->topology = topology;
 
-	/* register module with gbcodec */
-	ret = gbaudio_register_module(gbmodule);
-	if (ret)
-		goto release_topology;
-
 	/* Initialize data connections */
 	list_for_each_entry(dai, &gbmodule->data_list, list) {
 		ret = gb_connection_enable(dai->connection);
-		if (ret)
+		if (ret) {
+			dev_err(dev,
+				"%d:Error while enabling %d:data connection\n",
+				ret, dai->data_cport);
 			goto disable_data_connection;
+		}
 	}
-	gbmodule->is_connected = 1;
+
+	/* register module with gbcodec */
+	ret = gbaudio_register_module(gbmodule);
+	if (ret)
+		goto disable_data_connection;
 
 	/* inform above layer for uevent */
 	dev_dbg(dev, "Inform set_event:%d to above layer\n", 1);
@@ -348,16 +337,12 @@ static int gb_audio_probe(struct gb_bundle *bundle,
 	gbmodule->manager_id = gb_audio_manager_add(&desc);
 
 	dev_dbg(dev, "Add GB Audio device:%s\n", gbmodule->name);
-	mutex_unlock(&gb_codec_list_lock);
 
 	return 0;
 
 disable_data_connection:
 	list_for_each_entry_safe(dai, _dai, &gbmodule->data_list, list)
 		gb_connection_disable(dai->connection);
-	gbaudio_unregister_module(gbmodule);
-
-release_topology:
 	gbaudio_tplg_release(gbmodule);
 	gbmodule->topology = NULL;
 
@@ -378,7 +363,6 @@ destroy_connections:
 		gb_connection_destroy(gbmodule->mgmt_connection);
 
 	devm_kfree(dev, gbmodule);
-	mutex_unlock(&gb_codec_list_lock);
 
 	return ret;
 }
@@ -388,13 +372,11 @@ static void gb_audio_disconnect(struct gb_bundle *bundle)
 	struct gbaudio_module_info *gbmodule = greybus_get_drvdata(bundle);
 	struct gbaudio_data_connection *dai, *_dai;
 
-	mutex_lock(&gb_codec_list_lock);
-
-	gbaudio_unregister_module(gbmodule);
 
 	/* inform uevent to above layers */
 	gb_audio_manager_remove(gbmodule->manager_id);
 
+	gbaudio_unregister_module(gbmodule);
 	gbaudio_tplg_release(gbmodule);
 	gbmodule->topology = NULL;
 	kfree(gbmodule->topology);
@@ -409,7 +391,6 @@ static void gb_audio_disconnect(struct gb_bundle *bundle)
 	gbmodule->mgmt_connection = NULL;
 
 	devm_kfree(&bundle->dev, gbmodule);
-	mutex_unlock(&gb_codec_list_lock);
 }
 
 static const struct greybus_bundle_id gb_audio_id_table[] = {
