@@ -111,14 +111,6 @@ Contact:	Greg Kroah-Hartman <greg@kroah.com>
 Description:
 		Vendor ID of a Greybus interface.
 
-What:		/sys/bus/greybus/devices/N-M.I/version
-Date:		October 2015
-KernelVersion:	4.XX
-Contact:	Greg Kroah-Hartman <greg@kroah.com>
-Description:
-		Interface version represented as <16 bit major number>.<16 bit
-		minor number>.
-
 What:		/sys/bus/greybus/devices/N-M.I/voltage_now
 Date:		March 2016
 KernelVersion:	4.XX
@@ -169,6 +161,14 @@ KernelVersion:	4.XX
 Contact:	Greg Kroah-Hartman <greg@kroah.com>
 Description:
 		The interface-unique id of the bundle B.
+
+What:		/sys/bus/greybus/devices/N-M.I.B/gpbX
+Date:		April 2016
+KernelVersion:	4.XX
+Contact:	Greg Kroah-Hartman <greg@kroah.com>
+Description:
+		The General Purpose Bridged PHY device of the bundle B,
+		where X is a dynamically assigned 0-based id.
 
 What:		/sys/bus/greybus/devices/N-M.I.B/state
 Date:		October 2015
